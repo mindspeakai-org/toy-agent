@@ -1,6 +1,7 @@
 """Central agent orchestrator coordinating routing, memory, and handlers."""
 
 import logging
+import time
 from typing import Optional, Union
 
 from app.cloud.client import CloudClient
@@ -68,8 +69,12 @@ class AgentOrchestrator:
                 success=True,
             )
 
+        t_e2e_start = time.perf_counter()
+
         logger.info("================ PIPELINE START ================")
-        logger.info("USER_INPUT: %s", cleaned_text)
+        logger.info("[TOY_AGENT INPUT]  : %s", cleaned_text)
+        target_url = getattr(self.router, "target_url", "internal_mock")
+        logger.info("[ROUTER REQUEST]   : POST %s", target_url)
 
         # Step 1: Query Router
         try:
@@ -103,35 +108,36 @@ class AgentOrchestrator:
                 error=str(exc),
             )
 
-        # Step 2: Log Routing Decision
-        logger.info("ROUTER: %s", decision.route.value)
-        if decision.intent:
-            logger.info("INTENT: %s", decision.intent)
+        # Step 2: Log Routing Decision & Model
+        model_info = decision.model_name or "N/A"
+        logger.info("[SLM ROUTER]       : Model=%s", model_info)
+        logger.info("[ROUTING DECISION] : Route=%s | Intent=%s", decision.route.value, decision.intent)
         if decision.confidence is not None:
-            logger.info("CONFIDENCE: %.2f", decision.confidence)
+            logger.info("[CONFIDENCE]       : %.2f", decision.confidence)
         if decision.key:
-            logger.info("MEMORY_KEY: %s", decision.key)
+            logger.info("[MEMORY_KEY]       : %s", decision.key)
 
-        # Step 3: Dispatch to Handler
+        # Step 3: Dispatch to Handler with timing
+        t_handler_start = time.perf_counter()
         try:
             if decision.route == RouteType.MEMORY:
-                logger.info("HANDLER: MemoryHandler")
+                logger.info("[HANDLER]          : MemoryHandler")
                 response = await self.memory_handler.handle(cleaned_text, decision)
 
             elif decision.route == RouteType.LOCAL:
-                logger.info("HANDLER: LocalHandler")
+                logger.info("[HANDLER]          : LocalHandler")
                 response = await self.local_handler.handle(cleaned_text, decision)
 
             elif decision.route == RouteType.COMMAND:
-                logger.info("HANDLER: CommandHandler")
+                logger.info("[HANDLER]          : CommandHandler")
                 response = await self.command_handler.handle(cleaned_text, decision)
 
             elif decision.route == RouteType.CLOUD:
-                logger.info("HANDLER: CloudHandler")
+                logger.info("[HANDLER]          : CloudHandler")
                 response = await self.cloud_handler.handle(cleaned_text, decision)
 
             else:
-                logger.warning("HANDLER: Unhandled route [%s]", decision.route)
+                logger.warning("[HANDLER]          : Unhandled route [%s]", decision.route)
                 response = AgentResponse(
                     text="I'm not quite sure how to answer that yet, but I'm learning every day!",
                     route=RouteType.UNKNOWN,
@@ -149,7 +155,30 @@ class AgentOrchestrator:
                 error=str(exc),
             )
 
-        logger.info("RESPONSE: %s", response.text)
+        toy_handler_latency = round(time.perf_counter() - t_handler_start, 4)
+        e2e_total_latency = round(time.perf_counter() - t_e2e_start, 4)
+
+        # Telemetry metrics collection
+        timing_metrics = {
+            "http_latency_s": decision.http_latency,
+            "slm_classification_s": decision.timings.get("classification"),
+            "slm_handler_s": decision.timings.get("handler"),
+            "router_total_s": decision.timings.get("total"),
+            "toy_handler_s": toy_handler_latency,
+            "e2e_total_s": e2e_total_latency,
+        }
+        response.metadata["timings"] = timing_metrics
+
+        logger.info(
+            "[LATENCY METRICS]  : HTTP=%.3fs | SLM_Cls=%.3fs | SLM_Hdlr=%.3fs | Router_Tot=%.3fs | Toy_Hdlr=%.3fs | E2E_Tot=%.3fs",
+            timing_metrics["http_latency_s"] or 0.0,
+            timing_metrics["slm_classification_s"] or 0.0,
+            timing_metrics["slm_handler_s"] or 0.0,
+            timing_metrics["router_total_s"] or 0.0,
+            timing_metrics["toy_handler_s"] or 0.0,
+            timing_metrics["e2e_total_s"] or 0.0,
+        )
+        logger.info("[RESPONSE]         : %s", response.text)
         logger.info("================= PIPELINE END =================")
         return response
 

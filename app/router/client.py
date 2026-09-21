@@ -1,6 +1,7 @@
 """Dedicated client for communicating with the external slm-router service."""
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 import httpx
@@ -79,6 +80,7 @@ class RouterClient:
         }
 
         logger.debug("Dispatching request to router at %s: %s", self.target_url, cleaned_text)
+        t_start = time.perf_counter()
 
         try:
             response = await client.post(
@@ -96,6 +98,8 @@ class RouterClient:
             logger.warning("Unexpected network error communicating with router: %s", exc)
             raise RouterConnectionError(f"Router communication failed: {exc}") from exc
 
+        http_latency = round(time.perf_counter() - t_start, 3)
+
         if response.status_code != 200:
             logger.warning("Router responded with status code %d: %s", response.status_code, response.text)
             raise RouterResponseError(
@@ -112,7 +116,7 @@ class RouterClient:
             logger.warning("Router response JSON is not an object: %s", type(data))
             raise RouterResponseError("Router payload must be a JSON dictionary")
 
-        decision = RoutingDecision.from_payload(data, query=cleaned_text)
+        decision = RoutingDecision.from_payload(data, query=cleaned_text, http_latency=http_latency)
         logger.debug("Received routing decision: route=%s, intent=%s", decision.route, decision.intent)
         return decision
 

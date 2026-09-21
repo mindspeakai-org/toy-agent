@@ -17,9 +17,9 @@ class Settings(BaseSettings):
     )
 
     # Router Configuration
-    router_base_url: str = "http://localhost:8000"
+    router_base_url: str = "http://localhost:8008"
     router_route_endpoint: str = "/route"
-    router_timeout_seconds: float = 5.0
+    router_timeout_seconds: float = 15.0
 
     # Memory Storage
     memory_storage_path: Path = Path("data/memory.json")

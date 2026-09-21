@@ -6,15 +6,15 @@ The software brain and conversational orchestrator for an AI-powered smart toy f
 
 ## 1. Architectural Boundary & Repository Responsibilities
 
-This system is built with a clean separation of concerns across two distinct projects:
+This system maintains a strict separation of concerns across two independent repositories:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                              slm-router                                │
-│  - Standalone service / API                                            │
-│  - Responsible ONLY for query classification using an SLM              │
-│  - Decides destination: LOCAL, MEMORY, COMMAND, CLOUD                  │
-│  - Does not manage toy hardware, long-term memory, or agent flows      │
+│  - Independent service exposing a FastAPI endpoint                     │
+│  - Hosts the real Qwen2.5-1.5B-Instruct Small Language Model           │
+│  - Classifies natural language requests on-device (LOCAL/COMMAND/CLOUD)│
+│  - Exposes POST /route with execution latency telemetry                │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ HTTP (POST /route)
                                     ▼
@@ -22,275 +22,179 @@ This system is built with a clean separation of concerns across two distinct pro
 │                              toy-agent                                 │
 │  - THIS REPOSITORY                                                     │
 │  - Conversational Agent Brain & Orchestrator                           │
-│  - Consumes the slm-router API via RouterClient                        │
+│  - Consumes the real slm-router API via RouterClient                   │
 │  - Dispatches to specialized handlers:                                 │
-│      • MemoryHandler  (structured key-value storage)                   │
-│      • LocalHandler   (deterministic chit-chat & facts)                │
+│      • LocalHandler   (answers on-device queries)                      │
 │      • CommandHandler (safe device/action confirmations)               │
-│      • CloudHandler   (client stub for heavy queries)                  │
+│      • MemoryHandler  (structured key-value storage)                   │
+│      • CloudHandler   (client stub / bridge for complex queries)       │
 │  - Child-safe error handling and failure resilience                    │
-│  - Foundation for future STT, TTS, BLE, and ESP32 hardware             │
+│  - Foundation for future ESP32-S3 hardware & voice streaming           │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 > **Strict Architectural Rule:**
-> `toy-agent` communicates with `slm-router` solely across its HTTP API boundary. No models, classification heuristics, or internal modules from `slm-router` are copied, vendored, or imported.
+> `toy-agent` communicates with `slm-router` solely across its HTTP API boundary. No models, classification heuristics, or internal modules from `slm-router` are copied, vendored, or imported into `toy-agent`.
 
 ---
 
-## 2. Phase 1 Workflow
-
-In Phase 1, the pipeline operates end-to-end on clean text before any audio or hardware layers are introduced:
+## 2. Real End-to-End Integration Workflow (Phase 1.5)
 
 ```
-                  ┌───────────────┐
-                  │   User Text   │
-                  └───────┬───────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │   AgentOrchestrator   │
-              └───────────┬───────────┘
-                          │
-                          ▼
-                ┌──────────────────┐
-                │   RouterClient   │
-                └─────────┬────────┘
-                          │  HTTP POST /route
-                          ▼
-               ┌─────────────────────┐
-               │   slm-router API    │
-               └──────────┬──────────┘
-                          │  JSON Routing Decision
-                          ▼
-              ┌───────────────────────┐
-              │    RoutingDecision    │
-              └───────────┬───────────┘
-                          │
-         ┌────────────────┼────────────────┬───────────────┐
-         ▼                ▼                ▼               ▼
-   [ Route: LOCAL ] [ Route: MEMORY ] [ Route: COMMAND ] [ Route: CLOUD ]
-         │                │                │               │
-         ▼                ▼                ▼               ▼
-   LocalHandler     MemoryHandler    CommandHandler  CloudHandler
-   (Deterministic   (Atomic JSON     (Simulated      (Safe Stub)
-    Chit-chat)       Key-Value)       Actions)
-         │                │                │               │
-         └────────────────┴────────────────┴───────────────┘
-                                  │
-                                  ▼
-                     ┌─────────────────────────┐
-                     │ Child-Safe Text Response│
-                     └─────────────────────────┘
+                    ┌─────────────────────────┐
+                    │     User Text Input     │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                     ┌───────────────────────┐
+                     │   AgentOrchestrator   │
+                     └───────────┬───────────┘
+                                 │
+                                 ▼
+                       ┌───────────────────┐
+                       │   RouterClient    │
+                       └─────────┬─────────┘
+                                 │  HTTP POST /route {"query": "..."}
+                                 ▼
+                     ┌───────────────────────┐
+                     │    slm-router API     │  (FastAPI on :8008)
+                     └───────────┬───────────┘
+                                 │  Calls Router.route()
+                                 ▼
+                     ┌───────────────────────┐
+                     │  Qwen2.5-1.5B-Instruct│  (On-device SLM)
+                     └───────────┬───────────┘
+                                 │  Returns real routing decision & text
+                                 ▼
+                     ┌───────────────────────┐
+                     │    RoutingDecision    │  (Mapped in toy-agent)
+                     └───────────┬───────────┘
+                                 │
+         ┌───────────────────────┼───────────────────────┐
+         ▼                       ▼                       ▼
+   [ Route: LOCAL ]        [ Route: COMMAND ]      [ Route: CLOUD ]
+         │                       │                       │
+         ▼                       ▼                       ▼
+   LocalHandler            CommandHandler          CloudHandler
+   (Direct SLM Answer)     (Dynamic SLM Action)    (Cloud Bridge / Stub)
+         │                       │                       │
+         └───────────────────────┴───────────────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────┐
+                    │ Child-Safe Text Response│
+                    └─────────────────────────┘
 ```
 
 ---
 
-## 3. Project Structure
+## 3. Real Integration Startup Order
 
+To run the real, unmocked conversational toy pipeline:
+
+### Step 1: Start the Real `slm-router` Service
+In the `slm-router` project repository:
+
+```bash
+# In slm-router directory:
+uv run uvicorn api:app --host 127.0.0.1 --port 8008
+```
+
+You will see:
 ```text
-toy-agent/
-├── app/
-│   ├── __init__.py
-│   ├── agent/
-│   │   ├── __init__.py
-│   │   └── orchestrator.py        # Central agent workflow & error fallbacks
-│   ├── cloud/
-│   │   ├── __init__.py
-│   │   └── client.py              # Cloud AI client interface & safe stub
-│   ├── config/
-│   │   ├── __init__.py
-│   │   └── settings.py            # Pydantic Settings loaded from .env
-│   ├── handlers/
-│   │   ├── __init__.py
-│   │   ├── base.py                # Abstract BaseHandler interface
-│   │   ├── cloud.py               # Cloud route handler
-│   │   ├── command.py             # Device action handler
-│   │   ├── local.py               # Deterministic conversational handler
-│   │   └── memory.py              # Memory query and update handler
-│   ├── memory/
-│   │   ├── __init__.py
-│   │   └── store.py               # Atomic JSON-backed key-value store
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── responses.py           # Standardized AgentResponse model
-│   └── router/
-│       ├── __init__.py
-│       ├── client.py              # Async HTTP client for slm-router API
-│       ├── exceptions.py          # Custom domain exception hierarchy
-│       ├── mock.py                # Deterministic MockRouterClient for testing
-│       └── models.py              # RoutingDecision & RouteType models
-├── data/                          # Default directory for local memory storage
-├── tests/
-│   ├── __init__.py
-│   ├── test_handlers.py           # Unit tests for all handlers
-│   ├── test_memory.py             # Unit tests for memory persistence
-│   ├── test_orchestrator.py       # Unit & integration tests for orchestrator
-│   └── test_router_client.py      # Unit tests for router HTTP client
-├── .env.example                   # Environment variable template
-├── .gitignore
-├── pyproject.toml
-├── requirements.txt
-├── README.md
-└── main.py                        # Interactive CLI REPL for manual testing
+Loading SLM on device: mps...
+SLM loaded on mps.
+INFO: Uvicorn running on http://127.0.0.1:8008
+```
+
+### Step 2: Start `toy-agent`
+In the `toy-agent` directory:
+
+```bash
+# In toy-agent directory:
+.venv/bin/python main.py --verbose --base-url http://localhost:8008
+```
+
+### Step 3: Converse
+Interact with the real model in real-time:
+```text
+You: Hello
+Toy: Hello! How can I assist you today?
+
+You: Turn on the lights.
+Toy: Sure thing! The lights have been turned on for you. Enjoy your evening!
+
+You: What is the capital of France?
+Toy: The capital of France is Paris.
 ```
 
 ---
 
-## 4. Setup Instructions
+## 4. Configuration & Environment Variables
 
-### Prerequisites
-- Python 3.11+
-- `uv` (recommended) or standard `python3 -m venv`
-
-### Installation
-
-1. Clone the repository and enter the directory:
-   ```bash
-   cd toy-agent
-   ```
-
-2. Create and activate a virtual environment:
-   ```bash
-   # Using uv:
-   uv venv .venv
-   source .venv/bin/activate
-
-   # Or using standard venv:
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Create your local environment configuration:
-   ```bash
-   cp .env.example .env
-   ```
-
----
-
-## 5. Configuration & Environment Variables
+Create `.env` from `.env.example`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `ROUTER_BASE_URL` | `http://localhost:8000` | Base URL of the external `slm-router` HTTP service |
-| `ROUTER_ROUTE_ENDPOINT` | `/route` | Route classification endpoint path |
-| `ROUTER_TIMEOUT_SECONDS` | `5.0` | Maximum wait time for router responses |
+| `ROUTER_BASE_URL` | `http://localhost:8008` | URL of the running `slm-router` API |
+| `ROUTER_ROUTE_ENDPOINT` | `/route` | Router classification endpoint path |
+| `ROUTER_TIMEOUT_SECONDS` | `15.0` | Timeout allowing full SLM token generation |
 | `MEMORY_STORAGE_PATH` | `data/memory.json` | File path for local key-value persistence |
-| `ENVIRONMENT` | `development` | Deployment environment (`development`, `test`, `production`) |
-| `LOG_LEVEL` | `INFO` | Console logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `CLOUD_PROVIDER_STUB_MODE` | `true` | When true, returns deterministic stub without cloud API keys |
+| `ENVIRONMENT` | `development` | Deployment environment |
+| `LOG_LEVEL` | `INFO` | Console log verbosity (`DEBUG`, `INFO`) |
+| `CLOUD_PROVIDER_STUB_MODE` | `true` | When true, returns safe stub for CLOUD route |
 
 ---
 
-## 6. How to Run
+## 5. Measured Performance & Latency Telemetry
 
-### Option A: Standalone Mode with Mock Router
-Test the complete conversational pipeline without spinning up the external `slm-router` service:
+When connected to the real `Qwen2.5-1.5B-Instruct` model on Apple Silicon (MPS), real queries exhibit the following baseline latencies:
 
+| Query | Classified Route | SLM Cls Latency | SLM Handler Latency | HTTP Latency | End-to-End Total |
+|---|---|---|---|---|---|
+| `"Hello"` | `LOCAL` | 1.168s | 0.515s | 1.702s | **1.734s** |
+| `"Turn on the lights."` | `COMMAND` | 1.043s | 1.012s | 2.040s | **2.040s** |
+| `"Tell me a joke."` | `LOCAL` | 1.058s | 0.723s | 1.784s | **1.784s** |
+| `"What is the capital of France?"` | `LOCAL` | 1.164s | 0.498s | 1.666s | **1.666s** |
+| `"Can you turn down the volume?"` | `COMMAND` | 1.146s | 1.662s | 2.812s | **2.812s** |
+| `"Why is the sky blue?"` | `LOCAL` (Long answer) | 1.039s | 11.117s | 12.162s | **12.163s** |
+
+---
+
+## 6. Testing
+
+### Run All Tests
 ```bash
-python main.py --mock-router --verbose
+.venv/bin/pytest tests/ -v
 ```
 
-### Option B: Connected to Live `slm-router` Service
-1. In the `slm-router` project directory, start the API service (e.g. on port 8000):
-   ```bash
-   # (In slm-router directory)
-   uv run uvicorn api:app --port 8000
-   ```
-2. In `toy-agent`, launch the agent:
-   ```bash
-   python main.py --verbose
-   ```
+All 37 tests will run and pass:
+- 36 offline unit tests covering request serialization, memory store, handlers, and error resilience.
+- 1 live integration test (`test_live_slm_router_integration`) verifying direct HTTP communication with the active `slm-router`.
 
 ---
 
-## 7. Example Interaction
+## 7. Troubleshooting
 
-```text
-🤖 TOY AGENT — PHASE 1 TEXT INTERFACE
-Mode: Internal Mock Router (Standalone Test Mode)
-Type 'exit', 'quit', or press Ctrl+C to stop.
-============================================================
-
-You: Hello!
-Toy: Hello there! I'm your toy friend. What would you like to talk about today?
-
-You: My favorite animal is a tiger.
-Toy: Got it! I'll remember that your favorite animal is tiger.
-
-You: What is my favorite animal?
-Toy: Your favorite animal is tiger.
-
-You: Turn up the volume.
-Toy: Okay, I turned the volume up for you!
-
-You: Why is the sky blue?
-Toy: That sounds like a wonderful big question! This question would be sent to the cloud AI.
-
-You: exit
-Toy: Bye for now! See you next time!
-```
+- **Router connection refused (`http://localhost:8008/route`)**:
+  - Ensure the `slm-router` uvicorn server is running: `curl http://127.0.0.1:8008/health`.
+  - Check that port 8008 is not blocked by a firewall.
+- **Port 8000 conflict**:
+  - Port 8000 is frequently reserved on development machines. `slm-router` and `toy-agent` default to port `8008` to prevent port collisions.
+- **Timeout on long queries**:
+  - On CPU/MPS devices, generating multi-paragraph responses can take ~10 seconds. Keep `ROUTER_TIMEOUT_SECONDS=15.0`.
 
 ---
 
-## 8. Failure Modes & Resilience
-
-The toy is designed so that network anomalies or external service downtime never crash the application or expose stack traces to the child:
-
-- **Router Unavailable / Connection Refused**: Returns `"I'm having trouble connecting right now. Let's try again in a moment!"`
-- **Router Timeout**: Returns `"I'm taking a little too long to think right now. Could you ask me again?"`
-- **Router Malformed JSON**: Returns `"I had trouble understanding that. Let's try something else!"`
-- **Memory Key Miss**: Friendly prompt: `"I don't know your favorite color yet! What is it?"`
-- **Handler Execution Failure**: Returns `"Oops, something went a little wobbly on my end. Can you say that again?"`
-
----
-
-## 9. Running Tests
-
-Run the complete test suite:
-
-```bash
-pytest tests/ -v
-```
-
-To run only unit tests:
-```bash
-pytest tests/ -v -m "not integration"
-```
-
-To run the live integration test (when `slm-router` is active on port 8000):
-```bash
-pytest tests/test_orchestrator.py -k test_live_slm_router_integration -v
-```
-
----
-
-## 10. Phase 1 Limitations & Phase 2 Roadmap
-
-### Current Phase 1 Boundaries
-- Text-only input and text-only response (no audio processing).
-- Device actions are simulated with acknowledgements (no physical actuators or GPIO).
-- Key-value memory store without vector embeddings or semantic search.
-- Cloud handler operates as a safe stub without production cloud API dependencies.
-
-### Future Phase 2 Roadmap
-In Phase 2, the pipeline expands naturally into voice and hardware without altering the core orchestrator:
+## 8. Architectural Roadmap
 
 ```
-Microphone → Audio Frontend (Noise Suppression) → STT (Sherpa-ONNX / Whisper)
-    ↓
-Agent Orchestrator
-    ↓
-RouterClient (slm-router)
-    ↓
-Specialized Handler (Memory / Hardware Actuator / Cloud LLM)
-    ↓
-Response Text
-    ↓
-TTS Engine → Speaker
+[Current Phase 1.5]
+Text Input ──► toy-agent ──► RouterClient ──► real slm-router API (Qwen 1.5B) ──► Handler ──► Text Output
+
+[Upcoming Phase 2]
+Microphone / Audio ──► STT ──► toy-agent ──► real slm-router API ──► Handler ──► TTS (Natural Female Voice) ──► Speaker
+
+[Final ESP32-S3 Architecture]
+INMP441 Mic ──► ESP32-S3 I2S ──► Companion Bridge ──► Agent Orchestrator ──► MAX98357A Amp ──► Speaker
 ```

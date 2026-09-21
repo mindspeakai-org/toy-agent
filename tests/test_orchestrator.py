@@ -195,20 +195,28 @@ async def test_live_slm_router_integration() -> None:
 
     Skips automatically if the service is not currently running.
     """
-    router_url = "http://localhost:8000/route"
+    from app.config.settings import get_settings
+    settings = get_settings()
+    health_url = f"{settings.router_base_url.rstrip('/')}/health"
     try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            resp = await client.post(router_url, json={"query": "ping", "text": "ping"})
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(health_url)
             if resp.status_code != 200:
-                pytest.skip(f"Service at {router_url} is not an active SLM router (HTTP {resp.status_code})")
+                pytest.skip(f"Service at {health_url} is not healthy (HTTP {resp.status_code})")
     except Exception:
-        pytest.skip(f"External slm-router service is not reachable at {router_url}")
+        pytest.skip(f"External slm-router service is not reachable at {health_url}")
 
-    real_router = RouterClient(base_url="http://localhost:8000", endpoint="/route")
+    real_router = RouterClient(
+        base_url=settings.router_base_url,
+        endpoint=settings.router_route_endpoint,
+        timeout=15.0,
+    )
     orchestrator = AgentOrchestrator(router_client=real_router)
 
     try:
         res = await orchestrator.process("Turn on the light")
         assert res.success is True
+        assert res.route == RouteType.COMMAND
+        assert "light" in res.text.lower() or "turned on" in res.text.lower()
     finally:
         await orchestrator.aclose()
