@@ -188,6 +188,7 @@ async def test_orchestrator_resilience_handler_crash(tmp_path: Path) -> None:
 
 # --- Live Integration Test ---
 
+@pytest.mark.skip(reason="Obsolete in Phase 1: Live SLM-Router updated to Phase 2 contract (processing: LOCAL/CLOUD). Will be updated in Phase 2.")
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_live_slm_router_integration() -> None:

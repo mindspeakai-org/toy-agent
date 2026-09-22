@@ -59,6 +59,17 @@ class AgentOrchestrator:
         self.stt = stt_provider or DevelopmentSTTProvider()
         self.tts = tts_provider or DevelopmentTTSProvider()
 
+    async def transcribe_audio(self, audio_data: bytes) -> str:
+        """Convert input audio data to text query using the configured STTProvider.
+
+        Args:
+            audio_data: Raw input audio bytes.
+
+        Returns:
+            str: Transcribed text query.
+        """
+        return await self.stt.transcribe(audio_data)
+
     async def process_voice(self, audio_data: bytes) -> tuple[AgentResponse, bytes]:
         """Process incoming voice audio through the end-to-end conversational pipeline.
 
@@ -74,7 +85,7 @@ class AgentOrchestrator:
         t_voice_start = time.perf_counter()
 
         # Step 1: Speech-to-Text
-        transcribed_text = await self.stt.transcribe(audio_data)
+        transcribed_text = await self.transcribe_audio(audio_data)
         stt_duration = round(time.perf_counter() - t_voice_start, 4)
         logger.info("[VOICE STT] Transcribed %d audio bytes -> '%s' (%.3fs)", len(audio_data), transcribed_text, stt_duration)
 

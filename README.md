@@ -154,13 +154,16 @@ Toy: The capital of France is Paris.
 
 ---
 
-## 4. Voice Interfaces & Audio Layer (`app.audio`)
+## 4. Voice Input & Speech Processing Layer (`app.audio`)
 
-Phase 2 establishes clean, portable interfaces for speech input and speech synthesis without any coupling to macOS-specific APIs (no `say`, CoreAudio, or Apple frameworks):
+Phase 1 establishes clean, portable interfaces for audio sources and speech-to-text transcription without any coupling to hardware microphones or macOS-specific APIs:
 
-- **`STTProvider` (`app.audio.stt`)**: Abstract base class defining `async def transcribe(audio_data: bytes, format: str = "wav") -> str`. Includes `DevelopmentSTTProvider` for development and testing.
-- **`TTSProvider` (`app.audio.tts`)**: Abstract base class defining `async def synthesize(text: str) -> bytes`. Includes `DevelopmentTTSProvider` which produces valid standard 16kHz mono PCM RIFF WAV audio bytes using Python's built-in `wave` and `struct` libraries without third-party audio dependencies.
-- **Orchestrator Voice Method**: `AgentOrchestrator.process_voice(audio_data: bytes, format: str = "wav") -> tuple[AgentResponse, bytes]` pipes audio through STT -> Orchestrator Router/Handlers -> TTS.
+- **`AudioInput` (`app.audio.input`)**: Abstract base class defining `async def read() -> bytes`. Decouples where audio originates (embedded I2S buffer, companion app stream, file, or test double) from how it is processed. Includes `BufferAudioInput` (in-memory buffer) and `DevelopmentAudioInput` (deterministic payload wrapper for testing).
+- **`STTProvider` (`app.audio.stt`)**: Abstract base class defining `async def transcribe(audio_data: bytes, **kwargs) -> str`.
+  > **Note on Development STT:** `DevelopmentSTTProvider` is a deterministic test double and development fixture. It does **not** run a heavyweight local speech recognition neural network (such as Whisper or Kaldi). Instead, it enables fast, reproducible testing across all platforms by converting structured test payloads or registered byte mappings into deterministic query text.
+- **Audio Error Handling (`app.audio.exceptions`)**: Structured exceptions (`AudioInputError`, `TranscriptionError`) handle `None`, empty buffers, and malformed audio streams cleanly without crashing the orchestrator.
+- **`TTSProvider` (`app.audio.tts`)**: Abstract base class defining `async def synthesize(text: str) -> bytes`. Includes `DevelopmentTTSProvider` which synthesizes valid standard 16kHz mono PCM RIFF WAV audio bytes using only Python standard library `wave` and `struct`.
+- **Orchestrator STT Method**: `AgentOrchestrator.transcribe_audio(audio_data: bytes) -> str` exposes a dedicated method isolating the audio-to-text step before routing.
 
 ---
 
@@ -196,17 +199,22 @@ When connected to the real `Qwen2.5-1.5B-Instruct` model on Apple Silicon (MPS),
 
 ## 7. Testing
 
-### Run All Unit & Integration Tests
+### Run Phase 1 Audio Tests
+```bash
+.venv/bin/pytest tests/test_audio.py -v
+```
+
+### Run Full Test Suite
 ```bash
 .venv/bin/pytest tests/ -v
 ```
 
-All 43 tests pass cleanly:
+All 49 unit tests pass cleanly:
+- **AudioInput tests**: verifies `BufferAudioInput` and `DevelopmentAudioInput`, ensuring empty/None inputs raise `AudioInputError`.
+- **STTProvider tests**: verifies deterministic transcription, registered mappings, fallback behavior, corrupt payload rejection (`TranscriptionError`), and strictly checks for zero Mac-native imports across `app/audio`.
 - **RouterClient tests**: health check success/failure, timeout handling, connection refused, malformed response, HTTP errors.
-- **Audio tests**: `STTProvider`, `TTSProvider` standard WAV generation, orchestrator voice pipeline.
 - **Orchestrator tests**: routing decision dispatch, failure recovery, telemetry capture.
 - **Memory & Handler tests**: structured KV storage, local handler, command handler, cloud stub.
-- **Live Integration test**: verifies end-to-end HTTP communication when `slm-router` is active.
 
 ---
 
