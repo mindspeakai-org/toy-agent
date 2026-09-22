@@ -125,18 +125,67 @@ In the `toy-agent` directory:
 
 ## 4. Voice Input & Speech Processing Layer (`app.audio`)
 
-Phase 1 establishes clean, portable interfaces for audio sources and speech-to-text transcription without any coupling to hardware microphones or macOS-specific APIs:
+The audio layer implements a decoupled architecture:
+```
+Microphone / Hardware
+         ↓
+    AudioInput          (app.audio.input, app.audio.microphone)
+         ↓ bytes (16kHz mono WAV)
+    STTProvider         (app.audio.stt, app.audio.whisper_stt)
+         ↓ str
+  Recognized Text
+```
 
-- **`AudioInput` (`app.audio.input`)**: Abstract base class defining `async def read() -> bytes`. Decouples where audio originates (embedded I2S buffer, companion app stream, file, or test double) from how it is processed. Includes `BufferAudioInput` (in-memory buffer) and `DevelopmentAudioInput` (deterministic payload wrapper for testing).
+### Core Abstractions
+- **`AudioInput` (`app.audio.input`)**: Abstract base class defining `async def read() -> bytes`. Decouples where audio originates (embedded I2S buffer, companion app stream, file, or physical microphone) from how it is processed.
+  - `MicrophoneAudioInput` (`app.audio.microphone`): Real development microphone input capturing physical audio via `sounddevice` and packaging standard 16kHz mono 16-bit WAV bytes.
+  - `BufferAudioInput`: In-memory byte buffer for tests and network streaming.
+  - `DevelopmentAudioInput`: Deterministic payload wrapper for test suites.
 - **`STTProvider` (`app.audio.stt`)**: Abstract base class defining `async def transcribe(audio_data: bytes, **kwargs) -> str`.
-  > **Note on Development STT:** `DevelopmentSTTProvider` is a deterministic test double and development fixture. It does **not** run a heavyweight local speech recognition neural network (such as Whisper or Kaldi). Instead, it enables fast, reproducible testing across all platforms by converting structured test payloads or registered byte mappings into deterministic query text.
-- **Audio Error Handling (`app.audio.exceptions`)**: Structured exceptions (`AudioInputError`, `TranscriptionError`) handle `None`, empty buffers, and malformed audio streams cleanly without crashing the orchestrator.
-- **`TTSProvider` (`app.audio.tts`)**: Abstract base class defining `async def synthesize(text: str) -> bytes`. Includes `DevelopmentTTSProvider` which synthesizes valid standard 16kHz mono PCM RIFF WAV audio bytes using only Python standard library `wave` and `struct`.
-- **Orchestrator STT Method**: `AgentOrchestrator.transcribe_audio(audio_data: bytes) -> str` exposes a dedicated method isolating the audio-to-text step before routing.
+  - `WhisperSTTProvider` (`app.audio.whisper_stt`): Real local speech recognition using quantized `faster-whisper` (`tiny.en` on CPU/int8). Zero cloud API keys or external services required.
+  - `DevelopmentSTTProvider`: Deterministic test double for reproducible offline testing.
+- **Audio Error Handling (`app.audio.exceptions`)**: Structured exceptions (`AudioInputError`, `TranscriptionError`) handle unavailable microphones, empty captures, truncated WAVs, and missing dependencies cleanly.
+- **`TTSProvider` (`app.audio.tts`)**: Abstract base class defining `async def synthesize(text: str) -> bytes`.
+- **Orchestrator STT Method**: `AgentOrchestrator.transcribe_audio(audio_data: bytes) -> str` isolates the audio-to-text step before routing.
 
 ---
 
-## 5. Configuration & Environment Variables
+## 5. Real Voice Test (Microphone → Whisper STT)
+
+### Step 1: Install Voice Dependencies
+```bash
+pip install -e ".[voice]"
+# or: pip install sounddevice numpy faster-whisper
+```
+
+### Step 2: Run Real Microphone & STT Test
+```bash
+python main.py --voice
+```
+
+Optional arguments:
+- `--voice-duration 5.0`: Set custom recording duration in seconds (default is `4.0s`).
+- `--voice-loop`: Run continuously in an interactive voice loop.
+- `-v`, `--verbose`: Enable detailed model loading and audio debug logging.
+
+Expected output:
+```
+============================================================
+🎤 TOY AGENT — REAL VOICE PIPELINE (PHASE 1)
+Audio Input:  MicrophoneAudioInput (16kHz mono)
+STT Engine:   WhisperSTTProvider (faster-whisper 'tiny.en')
+Duration:     4.0s
+============================================================
+
+🎤 Speak now...
+[capture audio]
+[run real STT]
+
+Recognized text:
+"What is my favorite animal?"
+```
+
+## 6. Configuration & Environment Variables
 
 Configuration is loaded from environment variables or `.env`:
 
@@ -153,7 +202,7 @@ Configuration is loaded from environment variables or `.env`:
 
 ---
 
-## 6. Measured Performance & Latency Telemetry
+## 7. Measured Performance & Latency Telemetry
 
 When connected to the real `Qwen2.5-1.5B-Instruct` model on Apple Silicon (MPS), real queries exhibit the following baseline latencies:
 
@@ -166,7 +215,7 @@ When connected to the real `Qwen2.5-1.5B-Instruct` model on Apple Silicon (MPS),
 
 ---
 
-## 7. Testing
+## 8. Testing
 
 ### Run Phase 1 Audio Tests
 ```bash
@@ -178,7 +227,7 @@ When connected to the real `Qwen2.5-1.5B-Instruct` model on Apple Silicon (MPS),
 .venv/bin/pytest tests/ -v
 ```
 
-All 49 unit tests pass cleanly:
+All 75 unit tests pass cleanly:
 - **AudioInput tests**: verifies `BufferAudioInput` and `DevelopmentAudioInput`, ensuring empty/None inputs raise `AudioInputError`.
 - **STTProvider tests**: verifies deterministic transcription, registered mappings, fallback behavior, corrupt payload rejection (`TranscriptionError`), and strictly checks for zero Mac-native imports across `app/audio`.
 - **RouterClient tests**: health check success/failure, timeout handling, connection refused, malformed response, HTTP errors.
@@ -187,7 +236,7 @@ All 49 unit tests pass cleanly:
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 - **Router connection refused (`http://localhost:8008/route`)**:
   - Ensure the `slm-router` uvicorn server is running: `curl http://127.0.0.1:8008/health`.
@@ -199,7 +248,7 @@ All 49 unit tests pass cleanly:
 
 ---
 
-## 9. Architectural Roadmap
+## 10. Architectural Roadmap
 
 ```
 [Phase 1]

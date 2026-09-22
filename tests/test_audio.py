@@ -229,3 +229,279 @@ async def test_orchestrator_process_voice(tmp_path) -> None:
     assert voice_meta["stt_latency_s"] >= 0.0
     assert voice_meta["tts_latency_s"] >= 0.0
     assert voice_meta["audio_output_bytes"] == len(audio_out)
+
+
+# --- MicrophoneAudioInput Tests ---
+
+@pytest.mark.asyncio
+async def test_microphone_audio_input_valid(monkeypatch) -> None:
+    """Test MicrophoneAudioInput captures frames and produces standard WAV bytes."""
+    import numpy as np
+    from app.audio.microphone import MicrophoneAudioInput
+
+    class MockSoundDevice:
+        @staticmethod
+        def query_devices():
+            return [{"name": "Default Test Mic", "max_input_channels": 1}]
+
+        @staticmethod
+        def rec(frames, samplerate, channels, dtype, device=None):
+            # Generate dummy 16-bit PCM frames
+            return np.zeros((frames, channels), dtype=np.int16)
+
+        @staticmethod
+        def wait():
+            pass
+
+    monkeypatch.setattr("app.audio.microphone._get_sounddevice", lambda: MockSoundDevice)
+    monkeypatch.setattr("app.audio.microphone._get_numpy", lambda: np)
+
+    mic = MicrophoneAudioInput(sample_rate=16000, default_duration=0.1)
+    assert mic.name == "MicrophoneAudioInput"
+
+    wav_bytes = await mic.read(duration=0.1)
+    assert len(wav_bytes) > 44
+
+    # Verify standard WAV structure
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 16000
+        assert wav.getnframes() == int(0.1 * 16000)
+
+
+@pytest.mark.asyncio
+async def test_microphone_missing_dependency(monkeypatch) -> None:
+    """Test MicrophoneAudioInput raises AudioInputError if sounddevice is missing."""
+    from app.audio.microphone import MicrophoneAudioInput
+
+    def mock_missing():
+        raise AudioInputError("Missing development dependency 'sounddevice'")
+
+    monkeypatch.setattr("app.audio.microphone._get_sounddevice", mock_missing)
+
+    mic = MicrophoneAudioInput()
+    with pytest.raises(AudioInputError) as exc:
+        await mic.read()
+    assert "Missing development dependency 'sounddevice'" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_microphone_missing_numpy(monkeypatch) -> None:
+    """Test MicrophoneAudioInput raises AudioInputError if numpy is missing."""
+    from app.audio.microphone import MicrophoneAudioInput
+
+    class MockSoundDevice:
+        @staticmethod
+        def query_devices():
+            return [{"name": "Default Test Mic", "max_input_channels": 1}]
+
+    monkeypatch.setattr("app.audio.microphone._get_sounddevice", lambda: MockSoundDevice)
+
+    def mock_missing_numpy():
+        raise AudioInputError("Missing development dependency 'numpy'")
+
+    monkeypatch.setattr("app.audio.microphone._get_numpy", mock_missing_numpy)
+
+    mic = MicrophoneAudioInput()
+    with pytest.raises(AudioInputError) as exc:
+        await mic.read()
+    assert "Missing development dependency 'numpy'" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_microphone_unavailable_device(monkeypatch) -> None:
+    """Test MicrophoneAudioInput raises AudioInputError when microphone device is unavailable."""
+    import numpy as np
+    from app.audio.microphone import MicrophoneAudioInput
+
+    class MockSoundDeviceNoDevice:
+        @staticmethod
+        def query_devices():
+            return []
+
+    monkeypatch.setattr("app.audio.microphone._get_sounddevice", lambda: MockSoundDeviceNoDevice)
+    monkeypatch.setattr("app.audio.microphone._get_numpy", lambda: np)
+
+    mic = MicrophoneAudioInput()
+    with pytest.raises(AudioInputError) as exc:
+        await mic.read()
+    assert "Microphone unavailable" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_microphone_empty_audio_captured(monkeypatch) -> None:
+    """Test MicrophoneAudioInput raises AudioInputError if recording yields empty frames."""
+    import numpy as np
+    from app.audio.microphone import MicrophoneAudioInput
+
+    class MockSoundDeviceEmpty:
+        @staticmethod
+        def query_devices():
+            return [{"name": "Default Test Mic"}]
+
+        @staticmethod
+        def rec(frames, samplerate, channels, dtype, device=None):
+            return np.array([], dtype=np.int16)
+
+        @staticmethod
+        def wait():
+            pass
+
+    monkeypatch.setattr("app.audio.microphone._get_sounddevice", lambda: MockSoundDeviceEmpty)
+    monkeypatch.setattr("app.audio.microphone._get_numpy", lambda: np)
+
+    mic = MicrophoneAudioInput(default_duration=0.1)
+    with pytest.raises(AudioInputError) as exc:
+        await mic.read()
+    assert "Captured audio is empty" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_microphone_invalid_duration() -> None:
+    """Test MicrophoneAudioInput raises AudioInputError on non-positive duration."""
+    from app.audio.microphone import MicrophoneAudioInput
+
+    mic = MicrophoneAudioInput()
+    with pytest.raises(AudioInputError) as exc:
+        await mic.read(duration=0.0)
+    assert "Invalid recording duration" in str(exc.value)
+
+    with pytest.raises(AudioInputError) as exc_neg:
+        await mic.read(duration=-2.0)
+    assert "Invalid recording duration" in str(exc_neg.value)
+
+
+# --- WhisperSTTProvider Tests ---
+
+@pytest.mark.asyncio
+async def test_whisper_stt_input_validation() -> None:
+    """Test WhisperSTTProvider rejects None, empty, or non-bytes input."""
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    stt = WhisperSTTProvider()
+    assert stt.name == "WhisperSTTProvider"
+
+    with pytest.raises(AudioInputError) as exc_none:
+        await stt.transcribe(None)  # type: ignore[arg-type]
+    assert "cannot be None" in str(exc_none.value)
+
+    with pytest.raises(AudioInputError) as exc_empty:
+        await stt.transcribe(b"")
+    assert "cannot be empty" in str(exc_empty.value)
+
+    with pytest.raises(AudioInputError) as exc_type:
+        await stt.transcribe(42)  # type: ignore[arg-type]
+    assert "Expected bytes" in str(exc_type.value)
+
+
+@pytest.mark.asyncio
+async def test_whisper_stt_malformed_payload_rejected() -> None:
+    """Test WhisperSTTProvider rejects corrupted payload or truncated WAV."""
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    stt = WhisperSTTProvider()
+
+    with pytest.raises(TranscriptionError) as exc_corrupt:
+        await stt.transcribe(b"CORRUPT_AUDIO_PAYLOAD123")
+    assert "corrupted audio" in str(exc_corrupt.value).lower()
+
+    with pytest.raises(TranscriptionError) as exc_trunc:
+        await stt.transcribe(b"RIFF\x01\x00")
+    assert "truncated wav" in str(exc_trunc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_whisper_stt_missing_dependency(monkeypatch) -> None:
+    """Test WhisperSTTProvider raises TranscriptionError when faster-whisper is missing."""
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    def mock_missing_whisper():
+        raise TranscriptionError("Missing development dependency 'faster-whisper'")
+
+    monkeypatch.setattr("app.audio.whisper_stt._get_whisper_class", mock_missing_whisper)
+
+    stt = WhisperSTTProvider()
+    with pytest.raises(TranscriptionError) as exc:
+        await stt.transcribe(b"valid_bytes_for_check")
+    assert "Missing development dependency 'faster-whisper'" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_whisper_stt_initialization_failure(monkeypatch) -> None:
+    """Test WhisperSTTProvider raises TranscriptionError on model load failure."""
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    class FaultyWhisperModel:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("Model weight file not found")
+
+    monkeypatch.setattr("app.audio.whisper_stt._get_whisper_class", lambda: FaultyWhisperModel)
+
+    stt = WhisperSTTProvider()
+    with pytest.raises(TranscriptionError) as exc:
+        await stt.transcribe(b"dummy_payload")
+    assert "STT initialization failure" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_whisper_stt_mock_transcribe_success(monkeypatch) -> None:
+    """Test WhisperSTTProvider transcribes audio using a mocked WhisperModel."""
+    from collections import namedtuple
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    Segment = namedtuple("Segment", ["text"])
+
+    class MockModel:
+        def transcribe(self, stream, **kwargs):
+            return [Segment(text=" What is my favorite animal? ")], None
+
+    stt = WhisperSTTProvider()
+    stt._model = MockModel()
+
+    result = await stt.transcribe(b"dummy_audio_bytes")
+    assert result == "What is my favorite animal?"
+
+
+@pytest.mark.asyncio
+async def test_whisper_stt_transcription_failure(monkeypatch) -> None:
+    """Test WhisperSTTProvider handles transcription failure gracefully."""
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    class FaultyModel:
+        def transcribe(self, stream, **kwargs):
+            raise RuntimeError("Inference compute error")
+
+    stt = WhisperSTTProvider()
+    stt._model = FaultyModel()
+
+    with pytest.raises(TranscriptionError) as exc:
+        await stt.transcribe(b"dummy_audio_bytes")
+    assert "STT transcription failure" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_whisper_stt_real_model_execution() -> None:
+    """Test real WhisperSTTProvider runs local model inference on synthetic WAV audio."""
+    import numpy as np
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    # Generate a brief 0.5s valid 16kHz mono WAV file
+    sample_rate = 16000
+    num_frames = int(0.5 * sample_rate)
+    samples = np.zeros(num_frames, dtype=np.int16)
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(samples.tobytes())
+
+    wav_payload = buffer.getvalue()
+
+    stt = WhisperSTTProvider(model_size="tiny.en")
+    result = await stt.transcribe(wav_payload)
+    # Result for silence is empty or clean string without error
+    assert isinstance(result, str)
+

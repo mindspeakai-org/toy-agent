@@ -86,6 +86,22 @@ def parse_args() -> argparse.Namespace:
         help="Custom JSON file path for memory persistence.",
     )
     parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Run real voice capture (Microphone -> STT) and display recognized text.",
+    )
+    parser.add_argument(
+        "--voice-duration",
+        type=float,
+        default=4.0,
+        help="Duration in seconds to record from microphone (default: 4.0s).",
+    )
+    parser.add_argument(
+        "--voice-loop",
+        action="store_true",
+        help="Run voice pipeline continuously in an interactive loop.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -94,10 +110,77 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+async def run_voice_mode(duration: float, loop: bool, verbose: bool) -> None:
+    """Execute real microphone recording and Whisper speech-to-text pipeline."""
+    from app.audio.exceptions import AudioError
+    from app.audio.microphone import MicrophoneAudioInput
+    from app.audio.whisper_stt import WhisperSTTProvider
+
+    print("=" * 60)
+    print("🎤 TOY AGENT — REAL VOICE PIPELINE (PHASE 1)")
+    print("Audio Input:  MicrophoneAudioInput (16kHz mono)")
+    print("STT Engine:   WhisperSTTProvider (faster-whisper 'tiny.en')")
+    print(f"Duration:     {duration:.1f}s")
+    print("=" * 60)
+
+    try:
+        audio_input = MicrophoneAudioInput(default_duration=duration)
+        stt_provider = WhisperSTTProvider(model_size="tiny.en")
+    except Exception as exc:
+        print(f"❌ Failed to initialize voice components: {exc}")
+        return
+
+    # Pre-warm local Whisper model
+    if verbose:
+        print("Pre-warming local Whisper model...")
+    try:
+        _ = stt_provider._get_model()
+    except Exception as exc:
+        print(f"❌ STT initialization failure: {exc}")
+        return
+
+    while True:
+        try:
+            if loop and sys.stdin.isatty():
+                prompt = input("\nPress Enter to record (or type 'exit' to quit): ").strip()
+                if prompt.lower() in {"exit", "quit", ":q"}:
+                    print("Exiting voice mode.")
+                    break
+
+            print("\n🎤 Speak now...")
+            audio_bytes = await audio_input.read(duration=duration)
+            print("[capture audio]")
+            print("[run real STT]")
+
+            recognized_text = await stt_provider.transcribe(audio_bytes)
+            print("\nRecognized text:")
+            print(f'"{recognized_text}"')
+
+            if not loop:
+                break
+
+        except AudioError as exc:
+            print(f"\n❌ Voice error: {exc}")
+            if not loop:
+                break
+        except KeyboardInterrupt:
+            print("\nRecording cancelled.")
+            break
+
+
 async def main_async() -> None:
     """Async main entrypoint."""
     args = parse_args()
     configure_logging(args.verbose)
+
+    # Real voice pipeline mode (Phase 1)
+    if args.voice:
+        await run_voice_mode(
+            duration=args.voice_duration,
+            loop=args.voice_loop,
+            verbose=args.verbose,
+        )
+        return
 
     settings = get_settings()
 
