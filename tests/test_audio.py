@@ -11,7 +11,7 @@ from app.audio.stt import DevelopmentSTTProvider, STTProvider
 from app.audio.tts import DevelopmentTTSProvider
 from app.memory.store import MemoryStore
 from app.router.mock import MockRouterClient
-from app.router.models import RouteType, RoutingDecision
+from app.router.models import ProcessingType, RouteType, RoutingDecision
 
 
 # --- AudioInput Tests ---
@@ -198,9 +198,9 @@ async def test_orchestrator_process_voice(tmp_path) -> None:
     mock_router.set_mock_response(
         "turn on the lights",
         RoutingDecision(
-            route=RouteType.COMMAND,
-            intent="DEVICE_ACTION",
-            raw_response={"response": "The lights have been turned on."},
+            processing=ProcessingType.LOCAL,
+            memory_required=False,
+            memory_request=None,
         ),
     )
 
@@ -217,8 +217,8 @@ async def test_orchestrator_process_voice(tmp_path) -> None:
     response, audio_out = await orchestrator.process_voice(audio_in)
 
     assert response.success is True
-    assert response.route == RouteType.COMMAND
-    assert "lights" in response.text.lower()
+    assert response.processing == ProcessingType.LOCAL
+    assert response.decision is not None
     assert len(audio_out) > 44
 
     # Verify voice telemetry

@@ -1,26 +1,29 @@
-"""Router package: clients, models, and exceptions for slm-router communication."""
+"""Router client and data models for communicating with external slm-router."""
 
 from app.router.client import RouterClient
 from app.router.exceptions import (
-    HandlerError,
     RouterConnectionError,
     RouterError,
     RouterResponseError,
     RouterTimeoutError,
-    ToyAgentError,
 )
 from app.router.mock import MockRouterClient
-from app.router.models import RouteType, RoutingDecision
+from app.router.models import (
+    MemoryRequest,
+    ProcessingType,
+    RouteType,
+    RoutingDecision,
+)
 
 __all__ = [
     "RouterClient",
     "MockRouterClient",
-    "RouteType",
     "RoutingDecision",
-    "ToyAgentError",
+    "ProcessingType",
+    "MemoryRequest",
+    "RouteType",
     "RouterError",
     "RouterConnectionError",
     "RouterTimeoutError",
     "RouterResponseError",
-    "HandlerError",
 ]

@@ -48,7 +48,11 @@ async def interactive_repl(orchestrator: AgentOrchestrator, mode_desc: str, verb
             response = await orchestrator.process(user_input)
 
             if verbose:
-                print(f"   [Route: {response.route.value} | Handler: {response.handler} | Intent: {response.intent}]")
+                if response.decision:
+                    keys = response.decision.memory_request.keys if response.decision.memory_request else []
+                    print(f"   [Processing: {response.decision.processing.value} | MemoryRequired: {response.decision.memory_required} | Keys: {keys}]")
+                else:
+                    print(f"   [Response: success={response.success} | handler={response.handler}]")
 
             print(f"Toy: {response.text}")
 

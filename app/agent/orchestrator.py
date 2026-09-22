@@ -21,7 +21,7 @@ from app.router.exceptions import (
     RouterTimeoutError,
 )
 from app.router.mock import MockRouterClient
-from app.router.models import RouteType, RoutingDecision
+from app.router.models import ProcessingType, RouteType, RoutingDecision
 
 logger = logging.getLogger("toy_agent.orchestrator")
 
@@ -29,12 +29,10 @@ logger = logging.getLogger("toy_agent.orchestrator")
 class AgentOrchestrator:
     """Central orchestrator for the AI Toy Agent.
 
-    Coordinates the complete conversational pipeline:
-    1. Receives user text (or voice input via STTProvider).
-    2. Invokes external RouterClient for query classification.
-    3. Selects and executes the appropriate handler (LOCAL, MEMORY, COMMAND, CLOUD).
-    4. Enforces robust fallbacks for all network/router failure modes.
-    5. Normalizes the output into an AgentResponse (and synthesizes audio via TTSProvider).
+    In Phase 2, coordinates:
+    Audio Input (optional) -> STT -> Text -> RouterClient -> RoutingDecision.
+    Downstream generation (memory retrieval, local/cloud model execution) is
+    deferred to subsequent phases.
     """
 
     def __init__(
@@ -71,10 +69,10 @@ class AgentOrchestrator:
         return await self.stt.transcribe(audio_data)
 
     async def process_voice(self, audio_data: bytes) -> tuple[AgentResponse, bytes]:
-        """Process incoming voice audio through the end-to-end conversational pipeline.
+        """Process incoming voice audio through the Phase 1 audio pipeline and routing.
 
         Workflow:
-            Audio Input -> STT -> AgentOrchestrator -> RouterClient -> Handler -> TTS -> Audio Output
+            Audio Input -> STT -> AgentOrchestrator -> RouterClient -> RoutingDecision -> TTS -> Audio Output
 
         Args:
             audio_data: Raw input audio bytes.
@@ -89,16 +87,15 @@ class AgentOrchestrator:
         stt_duration = round(time.perf_counter() - t_voice_start, 4)
         logger.info("[VOICE STT] Transcribed %d audio bytes -> '%s' (%.3fs)", len(audio_data), transcribed_text, stt_duration)
 
-        # Step 2: Core Text Agent Processing
+        # Step 2: Text Routing Process
         response = await self.process(transcribed_text)
 
-        # Step 3: Text-to-Speech
+        # Step 3: Text-to-Speech synthesis
         t_tts_start = time.perf_counter()
         audio_output = await self.tts.synthesize(response.text)
         tts_duration = round(time.perf_counter() - t_tts_start, 4)
         logger.info("[VOICE TTS] Synthesized %d chars -> %d audio bytes (%.3fs)", len(response.text), len(audio_output), tts_duration)
 
-        # Record voice telemetry
         response.metadata["voice"] = {
             "stt_provider": self.stt.name,
             "tts_provider": self.tts.name,
@@ -110,7 +107,7 @@ class AgentOrchestrator:
         return response, audio_output
 
     async def process(self, text: str) -> AgentResponse:
-        """Process user text through the routing and handler pipeline.
+        """Process user text through RouterClient to produce a structured RoutingDecision.
 
         Guarantees that a child-safe AgentResponse is returned even in the event
         of network timeouts, router connection drops, or malformed data.
@@ -119,6 +116,7 @@ class AgentOrchestrator:
         if not cleaned_text:
             return AgentResponse(
                 text="I didn't hear anything! What's on your mind?",
+                processing=ProcessingType.LOCAL,
                 route=RouteType.UNKNOWN,
                 handler="Orchestrator",
                 intent="EMPTY_INPUT",
@@ -165,77 +163,43 @@ class AgentOrchestrator:
                 error=str(exc),
             )
 
-        # Step 2: Log Routing Decision & Model
-        model_info = decision.model_name or "N/A"
-        logger.info("[SLM ROUTER]       : Model=%s", model_info)
-        logger.info("[ROUTING DECISION] : Route=%s | Intent=%s", decision.route.value, decision.intent)
-        if decision.confidence is not None:
-            logger.info("[CONFIDENCE]       : %.2f", decision.confidence)
-        if decision.key:
-            logger.info("[MEMORY_KEY]       : %s", decision.key)
+        # Step 2: Log Routing Decision & Metadata
+        logger.info("[ROUTING DECISION] : Processing=%s | MemoryRequired=%s", decision.processing.value, decision.memory_required)
+        if decision.memory_request:
+            logger.info("[MEMORY KEYS]      : %s", decision.memory_request.keys)
 
-        # Step 3: Dispatch to Handler with timing
-        t_handler_start = time.perf_counter()
-        try:
-            if decision.route == RouteType.MEMORY:
-                logger.info("[HANDLER]          : MemoryHandler")
-                response = await self.memory_handler.handle(cleaned_text, decision)
-
-            elif decision.route == RouteType.LOCAL:
-                logger.info("[HANDLER]          : LocalHandler")
-                response = await self.local_handler.handle(cleaned_text, decision)
-
-            elif decision.route == RouteType.COMMAND:
-                logger.info("[HANDLER]          : CommandHandler")
-                response = await self.command_handler.handle(cleaned_text, decision)
-
-            elif decision.route == RouteType.CLOUD:
-                logger.info("[HANDLER]          : CloudHandler")
-                response = await self.cloud_handler.handle(cleaned_text, decision)
-
-            else:
-                logger.warning("[HANDLER]          : Unhandled route [%s]", decision.route)
-                response = AgentResponse(
-                    text="I'm not quite sure how to answer that yet, but I'm learning every day!",
-                    route=RouteType.UNKNOWN,
-                    handler="FallbackHandler",
-                    intent="UNHANDLED_ROUTE",
-                    metadata={"original_route": decision.route.value},
-                    success=False,
-                )
-
-        except Exception as exc:
-            logger.exception("HANDLER_ERROR: Execution failed in handler for route %s: %s", decision.route, exc)
-            return self._build_fallback(
-                "Oops, something went a little wobbly on my end. Can you say that again?",
-                reason="HANDLER_EXECUTION_FAILURE",
-                error=str(exc),
-            )
-
-        toy_handler_latency = round(time.perf_counter() - t_handler_start, 4)
         e2e_total_latency = round(time.perf_counter() - t_e2e_start, 4)
 
         # Telemetry metrics collection
         timing_metrics = {
             "http_latency_s": decision.http_latency,
-            "slm_classification_s": decision.timings.get("classification"),
-            "slm_handler_s": decision.timings.get("handler"),
             "router_total_s": decision.timings.get("total"),
-            "toy_handler_s": toy_handler_latency,
             "e2e_total_s": e2e_total_latency,
         }
-        response.metadata["timings"] = timing_metrics
+
+        # In Phase 2, the pipeline terminates at RoutingDecision (no downstream generation).
+        # We wrap the decision in AgentResponse for consumer inspection.
+        response = AgentResponse(
+            text=f"Routing decision: {decision.processing.value}",
+            processing=decision.processing,
+            decision=decision,
+            route=RouteType(decision.processing.value),
+            handler="SLMRouter",
+            metadata={
+                "timings": timing_metrics,
+                "raw_response": decision.raw_response,
+                "memory_required": decision.memory_required,
+                "memory_keys": decision.memory_request.keys if decision.memory_request else [],
+            },
+            success=True,
+        )
 
         logger.info(
-            "[LATENCY METRICS]  : HTTP=%.3fs | SLM_Cls=%.3fs | SLM_Hdlr=%.3fs | Router_Tot=%.3fs | Toy_Hdlr=%.3fs | E2E_Tot=%.3fs",
-            timing_metrics["http_latency_s"] or 0.0,
-            timing_metrics["slm_classification_s"] or 0.0,
-            timing_metrics["slm_handler_s"] or 0.0,
-            timing_metrics["router_total_s"] or 0.0,
-            timing_metrics["toy_handler_s"] or 0.0,
-            timing_metrics["e2e_total_s"] or 0.0,
+            "[LATENCY METRICS]  : HTTP=%.3fs | E2E_Tot=%.3fs",
+            decision.http_latency or 0.0,
+            e2e_total_latency,
         )
-        logger.info("[RESPONSE]         : %s", response.text)
+        logger.info("[DECISION SUMMARY] : %s (memory_required=%s)", decision.processing.value, decision.memory_required)
         logger.info("================= PIPELINE END =================")
         return response
 
@@ -245,6 +209,8 @@ class AgentOrchestrator:
         logger.info("================= PIPELINE END =================")
         return AgentResponse(
             text=message,
+            processing=ProcessingType.LOCAL,
+            decision=None,
             route=RouteType.UNKNOWN,
             handler="FallbackHandler",
             intent=reason,

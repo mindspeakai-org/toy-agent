@@ -39,18 +39,15 @@ This system maintains a strict separation of concerns across two independent rep
 
 ---
 
-## 2. Phase 2 Voice-Ready Architecture
+## 2. Phase 2 Architecture: Text → SLM-Router → RoutingDecision
+
+Phase 2 establishes the strict contract boundary between `toy-agent` and the external `slm-router` service:
 
 ```
                     ┌─────────────────────────┐
-                    │    Raw Audio / Mic      │
+                    │     User Text Query     │
                     └────────────┬────────────┘
                                  │
-                                 ▼
-                     ┌───────────────────────┐
-                     │      STTProvider      │  (Abstract STT Interface / Dev STT)
-                     └───────────┬───────────┘
-                                 │ Text Transcription
                                  ▼
                      ┌───────────────────────┐
                      │   AgentOrchestrator   │
@@ -63,63 +60,42 @@ This system maintains a strict separation of concerns across two independent rep
                                  │  HTTP POST /route {"query": "..."}
                                  ▼
                      ┌───────────────────────┐
-                     │    slm-router API     │  (FastAPI on :8008)
+                     │    slm-router API     │  (External service on :8008)
                      └───────────┬───────────┘
-                                 │  Calls Router.route()
+                                 │  Qwen2.5-1.5B-Instruct classification
                                  ▼
                      ┌───────────────────────┐
-                     │  Qwen2.5-1.5B-Instruct│  (On-device SLM)
-                     └───────────┬───────────┘
-                                 │  Returns real routing decision & text
-                                 ▼
-                     ┌───────────────────────┐
-                     │    RoutingDecision    │  (Normalized in toy-agent)
-                     └───────────┬───────────┘
-                                 │
-         ┌───────────────────────┼───────────────────────┐
-         ▼                       ▼                       ▼
-   [ Route: LOCAL ]        [ Route: COMMAND ]      [ Route: CLOUD ]
-         │                       │                       │
-         ▼                       ▼                       ▼
-   LocalHandler            CommandHandler          CloudHandler
-   (Direct SLM Answer)     (Dynamic SLM Action)    (Cloud Bridge / Stub)
-         │                       │                       │
-         └───────────────────────┴───────────────────────┘
-                                 │
-                                 ▼
-                     ┌─────────────────────────┐
-                     │ Child-Safe Text Response│
-                     └───────────┬─────────────┘
-                                 │ Text Response
-                                 ▼
-                     ┌─────────────────────────┐
-                     │       TTSProvider       │  (Abstract TTS Interface / Dev PCM WAV)
-                     └───────────┬─────────────┘
-                                 │ Synthesized Audio (WAV PCM)
-                                 ▼
-                     ┌─────────────────────────┐
-                     │    Audio Output / DAC   │
-                     └─────────────────────────┘
+                     │    RoutingDecision    │
+                     └───────────────────────┘
 ```
+
+### Authoritative SLM-Router Contract
+
+The external `slm-router` returns strictly routing decisions (it does **not** generate final answers, retrieve memory, execute commands, or call cloud LLMs):
+
+```json
+{
+  "processing": "LOCAL" | "CLOUD",
+  "memory_required": true | false,
+  "memory_request": {
+    "keys": ["favorite_animal", "child_name"]
+  } | null
+}
+```
+
+- **`processing`**: Must be either `"LOCAL"` or `"CLOUD"`.
+- **`memory_required`**: Strict boolean (`true` or `false`).
+- **`memory_request`**: Non-null if and only if `memory_required == true`, containing one or more semantic key identifiers.
 
 ---
 
-## 3. Real Integration & End-to-End Workflow
+## 3. Real Integration & Live Router Verification
 
-To run the real, unmocked conversational toy pipeline:
-
-### Step 1: Start the Real `slm-router` Service
+### Step 1: Start the External `slm-router` Service
 In the `slm-router` repository:
 
 ```bash
-# Terminal 1: In slm-router directory:
 uv run uvicorn --app-dir src slm_router.api:app --host 127.0.0.1 --port 8008
-```
-
-Verify it is active:
-```bash
-curl http://127.0.0.1:8008/health
-# {"status":"healthy","model":"Qwen/Qwen2.5-1.5B-Instruct"}
 ```
 
 ### Step 2: Diagnostic Health Check via `toy-agent`
@@ -130,27 +106,20 @@ In the `toy-agent` directory:
 # ✅ SLM Router is healthy at http://localhost:8008: {'status': 'healthy', 'model': 'Qwen/Qwen2.5-1.5B-Instruct'}
 ```
 
-### Step 3: Start `toy-agent` CLI
+### Step 3: Run Interactive CLI (Phase 2 Routing Mode)
 ```bash
-# Terminal 2: In toy-agent directory:
 .venv/bin/python main.py --verbose
 ```
 
-### Step 4: Converse
-Interact with the real Qwen2.5-1.5B model in real-time:
-```text
-You: Hello
-Toy: Hello! How can I assist you today?
+### Verified Live Queries (External Qwen2.5-1.5B on Port 8008)
 
-You: Turn on the lights
-Toy: I have turned on the lights for you. Enjoy your evening!
-
-You: Tell me a joke
-Toy: Why don't scientists trust atoms? Because they make up everything!
-
-You: What is the capital of France?
-Toy: The capital of France is Paris.
-```
+| Query | Processing | Memory Required | Memory Keys | HTTP Latency |
+|---|---|---|---|---|
+| `"Tell me a joke"` | `LOCAL` | `false` | `null` | 2.80s |
+| `"What is my favorite animal?"` | `LOCAL` | `true` | `["favorite_animal"]` | 2.60s |
+| `"What is my name and favorite animal?"` | `LOCAL` | `true` | `["child_name", "favorite_animal"]` | 2.77s |
+| `"What is the weather today?"` | `CLOUD` | `false` | `null` | 2.38s |
+| `"Turn on the lights"` | `LOCAL` | `false` | `null` | 2.30s |
 
 ---
 

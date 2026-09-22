@@ -1,11 +1,10 @@
-"""Unit and integration tests for AgentOrchestrator."""
+"""Unit and integration tests for AgentOrchestrator under the Phase 2 routing boundary."""
 
 from pathlib import Path
 import httpx
 import pytest
 
 from app.agent.orchestrator import AgentOrchestrator
-from app.handlers.local import LocalHandler
 from app.memory.store import MemoryStore
 from app.router.client import RouterClient
 from app.router.exceptions import (
@@ -14,81 +13,84 @@ from app.router.exceptions import (
     RouterTimeoutError,
 )
 from app.router.mock import MockRouterClient
-from app.router.models import RouteType, RoutingDecision
+from app.router.models import MemoryRequest, ProcessingType, RoutingDecision
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_memory_flow(tmp_path: Path) -> None:
-    """Test full memory write then read flow through orchestrator."""
-    memory_file = tmp_path / "memory.json"
-    memory_store = MemoryStore(memory_file)
-    mock_router = MockRouterClient()
-    orchestrator = AgentOrchestrator(
-        router_client=mock_router,
-        memory_store=memory_store,
-    )
-
-    # 1. Update memory
-    write_res = await orchestrator.process("My favorite animal is a tiger")
-    assert write_res.route == RouteType.MEMORY
-    assert write_res.success is True
-    assert "favorite animal is tiger" in write_res.text.lower()
-
-    # 2. Query memory
-    query_res = await orchestrator.process("What is my favorite animal?")
-    assert query_res.route == RouteType.MEMORY
-    assert query_res.success is True
-    assert "favorite animal is tiger" in query_res.text.lower()
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_local_flow(tmp_path: Path) -> None:
-    """Test local chit-chat flow."""
+async def test_orchestrator_preserves_routing_decision_local_no_memory(tmp_path: Path) -> None:
+    """Test text reaches router and LOCAL decision without memory is preserved."""
     mock_router = MockRouterClient()
     orchestrator = AgentOrchestrator(
         router_client=mock_router,
         memory_store=MemoryStore(tmp_path / "mem.json"),
     )
 
-    res = await orchestrator.process("Hello!")
-    assert res.route == RouteType.LOCAL
+    res = await orchestrator.process("Tell me a joke")
     assert res.success is True
-    assert "Hello" in res.text
+    assert res.processing == ProcessingType.LOCAL
+    assert res.decision is not None
+    assert res.decision.processing == ProcessingType.LOCAL
+    assert res.decision.memory_required is False
+    assert res.decision.memory_request is None
+    # Verify no downstream generation was attempted (decision is exposed)
+    assert res.handler == "SLMRouter"
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_command_flow(tmp_path: Path) -> None:
-    """Test device command flow."""
+async def test_orchestrator_preserves_routing_decision_local_with_memory(tmp_path: Path) -> None:
+    """Test LOCAL decision with required memory key is preserved without retrieving memory."""
     mock_router = MockRouterClient()
     orchestrator = AgentOrchestrator(
         router_client=mock_router,
         memory_store=MemoryStore(tmp_path / "mem.json"),
     )
 
-    res = await orchestrator.process("Turn up the volume")
-    assert res.route == RouteType.COMMAND
+    res = await orchestrator.process("What is my favorite animal?")
     assert res.success is True
-    assert "volume up" in res.text.lower()
+    assert res.processing == ProcessingType.LOCAL
+    assert res.decision is not None
+    assert res.decision.memory_required is True
+    assert res.decision.memory_request is not None
+    assert res.decision.memory_request.keys == ["favorite_animal"]
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_cloud_flow(tmp_path: Path) -> None:
-    """Test cloud dispatch flow."""
+async def test_orchestrator_preserves_routing_decision_multiple_memories(tmp_path: Path) -> None:
+    """Test LOCAL decision with multiple required memory keys is preserved."""
     mock_router = MockRouterClient()
     orchestrator = AgentOrchestrator(
         router_client=mock_router,
         memory_store=MemoryStore(tmp_path / "mem.json"),
     )
 
-    res = await orchestrator.process("Why is the sky blue?")
-    assert res.route == RouteType.CLOUD
+    res = await orchestrator.process("What is my name and favorite animal?")
     assert res.success is True
-    assert "cloud" in res.text.lower()
+    assert res.decision is not None
+    assert res.decision.memory_required is True
+    assert res.decision.memory_request is not None
+    assert res.decision.memory_request.keys == ["child_name", "favorite_animal"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_preserves_routing_decision_cloud(tmp_path: Path) -> None:
+    """Test CLOUD decision is preserved without calling external cloud LLM."""
+    mock_router = MockRouterClient()
+    orchestrator = AgentOrchestrator(
+        router_client=mock_router,
+        memory_store=MemoryStore(tmp_path / "mem.json"),
+    )
+
+    res = await orchestrator.process("What is the weather today?")
+    assert res.success is True
+    assert res.processing == ProcessingType.CLOUD
+    assert res.decision is not None
+    assert res.decision.processing == ProcessingType.CLOUD
+    assert res.decision.memory_required is False
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_empty_input(tmp_path: Path) -> None:
-    """Test empty string handling."""
+    """Test empty string handling short-circuits gracefully."""
     mock_router = MockRouterClient()
     orchestrator = AgentOrchestrator(
         router_client=mock_router,
@@ -97,25 +99,7 @@ async def test_orchestrator_empty_input(tmp_path: Path) -> None:
 
     res = await orchestrator.process("   ")
     assert "didn't hear anything" in res.text.lower()
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_unknown_route(tmp_path: Path) -> None:
-    """Test handling of unsupported/unknown routes."""
-    mock_router = MockRouterClient()
-    mock_router.set_mock_response(
-        "weird input",
-        RoutingDecision(route=RouteType.UNKNOWN, intent="UNKNOWN_INTENT"),
-    )
-    orchestrator = AgentOrchestrator(
-        router_client=mock_router,
-        memory_store=MemoryStore(tmp_path / "mem.json"),
-    )
-
-    res = await orchestrator.process("weird input")
-    assert res.route == RouteType.UNKNOWN
-    assert res.success is False
-    assert "not quite sure" in res.text.lower()
+    assert res.success is True
 
 
 @pytest.mark.asyncio
@@ -166,35 +150,19 @@ async def test_orchestrator_resilience_router_response_error(tmp_path: Path) -> 
     assert "trouble understanding" in res.text.lower()
 
 
-@pytest.mark.asyncio
-async def test_orchestrator_resilience_handler_crash(tmp_path: Path) -> None:
-    """Test graceful fallback when a handler raises an unexpected exception."""
-    class CrashingLocalHandler(LocalHandler):
-        async def handle(self, query: str, decision: RoutingDecision):
-            raise ZeroDivisionError("Unexpected crash inside handler")
-
-    mock_router = MockRouterClient()
-    orchestrator = AgentOrchestrator(
-        router_client=mock_router,
-        memory_store=MemoryStore(tmp_path / "mem.json"),
-        local_handler=CrashingLocalHandler(),
-    )
-
-    res = await orchestrator.process("Hello!")
-    assert res.success is False
-    assert res.intent == "HANDLER_EXECUTION_FAILURE"
-    assert "went a little wobbly" in res.text.lower()
-
-
 # --- Live Integration Test ---
 
-@pytest.mark.skip(reason="Obsolete in Phase 1: Live SLM-Router updated to Phase 2 contract (processing: LOCAL/CLOUD). Will be updated in Phase 2.")
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_live_slm_router_integration() -> None:
-    """Integration test connecting to live slm-router if reachable.
+    """Live integration test connecting to active slm-router on port 8008.
 
-    Skips automatically if the service is not currently running.
+    Validates that real router output adheres to the Phase 2 contract:
+    {
+      "processing": "LOCAL" | "CLOUD",
+      "memory_required": bool,
+      "memory_request": {"keys": [...]} | null
+    }
     """
     from app.config.settings import get_settings
     settings = get_settings()
@@ -215,9 +183,22 @@ async def test_live_slm_router_integration() -> None:
     orchestrator = AgentOrchestrator(router_client=real_router)
 
     try:
-        res = await orchestrator.process("Turn on the light")
-        assert res.success is True
-        assert res.route == RouteType.COMMAND
-        assert "light" in res.text.lower() or "turned on" in res.text.lower()
+        # Test 1: Turn on the lights -> LOCAL, memory_required=False
+        res_cmd = await orchestrator.process("Turn on the lights")
+        assert res_cmd.success is True
+        assert res_cmd.decision is not None
+        assert res_cmd.decision.processing == ProcessingType.LOCAL
+        assert res_cmd.decision.memory_required is False
+        assert res_cmd.decision.memory_request is None
+
+        # Test 2: What is my favorite animal? -> LOCAL, memory_required=True
+        res_mem = await orchestrator.process("What is my favorite animal?")
+        assert res_mem.success is True
+        assert res_mem.decision is not None
+        assert res_mem.decision.processing == ProcessingType.LOCAL
+        assert res_mem.decision.memory_required is True
+        assert res_mem.decision.memory_request is not None
+        assert "favorite_animal" in res_mem.decision.memory_request.keys
+
     finally:
         await orchestrator.aclose()

@@ -12,7 +12,7 @@ from app.router.exceptions import (
     RouterResponseError,
     RouterTimeoutError,
 )
-from app.router.models import RoutingDecision
+from app.router.models import ProcessingType, RoutingDecision
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,13 @@ logger = logging.getLogger(__name__)
 class RouterClient:
     """HTTP client communicating with the external SLM Router service.
 
-    Responsible only for sending text to the router and parsing the structured
-    decision response. Contains zero internal routing or classification logic.
+    Responsible only for sending text queries to the router and parsing the structured
+    decision response conforming to the authoritative contract:
+    {
+      "processing": "LOCAL" | "CLOUD",
+      "memory_required": bool,
+      "memory_request": {"keys": [...]} | null
+    }
     """
 
     def __init__(
@@ -60,7 +65,7 @@ class RouterClient:
         """Perform a single health check request against the external SLM Router.
 
         Returns:
-            Dict[str, Any]: Health status data returned by router (e.g. {"status": "healthy", "model": ...}).
+            Dict[str, Any]: Health status data returned by router.
 
         Raises:
             RouterConnectionError: Router service is unreachable.
@@ -98,10 +103,10 @@ class RouterClient:
             return False
 
     async def route(self, text: str) -> RoutingDecision:
-        """Send text to the external router and return a validated RoutingDecision.
+        """Send text to the external router and return a strictly validated RoutingDecision.
 
         Args:
-            text: User text to classify and route.
+            text: User text to classify.
 
         Returns:
             RoutingDecision: Strongly typed routing decision.
@@ -109,20 +114,20 @@ class RouterClient:
         Raises:
             RouterConnectionError: Router cannot be reached.
             RouterTimeoutError: Router call timed out.
-            RouterResponseError: Invalid HTTP response or payload.
+            RouterResponseError: Invalid HTTP response, malformed JSON, or schema violation.
         """
         cleaned_text = text.strip()
         if not cleaned_text:
-            return RoutingDecision.from_payload(
-                {"route": "UNKNOWN", "intent": "EMPTY_QUERY"},
+            return RoutingDecision(
+                processing=ProcessingType.LOCAL,
+                memory_required=False,
+                memory_request=None,
                 query=text,
             )
 
         client = await self._get_client()
-        # Provide both 'query' and 'text' keys for compatibility with various router APIs
         payload: Dict[str, Any] = {
             "query": cleaned_text,
-            "text": cleaned_text,
         }
 
         logger.debug("Dispatching request to router at %s: %s", self.target_url, cleaned_text)
@@ -162,8 +167,17 @@ class RouterClient:
             logger.warning("Router response JSON is not an object: %s", type(data))
             raise RouterResponseError("Router payload must be a JSON dictionary")
 
-        decision = RoutingDecision.from_payload(data, query=cleaned_text, http_latency=http_latency)
-        logger.debug("Received routing decision: route=%s, intent=%s", decision.route, decision.intent)
+        try:
+            decision = RoutingDecision.from_payload(data, query=cleaned_text, http_latency=http_latency)
+        except Exception as exc:
+            logger.warning("Invalid decision schema received from router: %s", exc)
+            raise RouterResponseError(f"Invalid decision schema received from router: {exc}") from exc
+
+        logger.debug(
+            "Received routing decision: processing=%s, memory_required=%s",
+            decision.processing.value,
+            decision.memory_required,
+        )
         return decision
 
     async def aclose(self) -> None:
