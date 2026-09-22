@@ -31,3 +31,7 @@ markers = [
     "integration: marks tests as integration tests requiring external services",
 ]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+

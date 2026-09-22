@@ -202,3 +202,112 @@ async def test_live_slm_router_integration() -> None:
 
     finally:
         await orchestrator.aclose()
+
+
+# --- Voice -> STT -> Router Integration Unit Tests ---
+
+@pytest.mark.asyncio
+async def test_orchestrator_route_audio_local_with_memory() -> None:
+    """Test deterministic route_audio transcribes bytes and routes to LOCAL with memory."""
+    from app.audio.stt import DevelopmentSTTProvider
+
+    mock_router = MockRouterClient()
+    stt = DevelopmentSTTProvider()
+    orchestrator = AgentOrchestrator(
+        router_client=mock_router,
+        stt_provider=stt,
+    )
+
+    audio_bytes = b"What is my favorite animal?"
+    text, decision = await orchestrator.route_audio(audio_bytes)
+
+    assert text == "What is my favorite animal?"
+    assert decision.processing == ProcessingType.LOCAL
+    assert decision.memory_required is True
+    assert decision.memory_request is not None
+    assert decision.memory_request.keys == ["favorite_animal"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_route_audio_cloud() -> None:
+    """Test deterministic route_audio routes weather queries to CLOUD."""
+    from app.audio.stt import DevelopmentSTTProvider
+
+    mock_router = MockRouterClient()
+    stt = DevelopmentSTTProvider()
+    orchestrator = AgentOrchestrator(
+        router_client=mock_router,
+        stt_provider=stt,
+    )
+
+    audio_bytes = b"What is the weather today?"
+    text, decision = await orchestrator.route_audio(audio_bytes)
+
+    assert text == "What is the weather today?"
+    assert decision.processing == ProcessingType.CLOUD
+    assert decision.memory_required is False
+    assert decision.memory_request is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_route_voice_configured_source() -> None:
+    """Test route_voice captures from configured AudioInput and returns RoutingDecision."""
+    from app.audio.input import BufferAudioInput
+    from app.audio.stt import DevelopmentSTTProvider
+
+    mock_router = MockRouterClient()
+    stt = DevelopmentSTTProvider()
+    audio_input = BufferAudioInput(b"Tell me a joke.")
+
+    orchestrator = AgentOrchestrator(
+        router_client=mock_router,
+        stt_provider=stt,
+        audio_input=audio_input,
+    )
+
+    text, decision = await orchestrator.route_voice()
+    assert text == "Tell me a joke."
+    assert decision.processing == ProcessingType.LOCAL
+    assert decision.memory_required is False
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_route_voice_missing_audio_input() -> None:
+    """Test route_voice raises AudioInputError when no AudioInput is provided or configured."""
+    from app.audio.exceptions import AudioInputError
+    from app.audio.stt import DevelopmentSTTProvider
+
+    mock_router = MockRouterClient()
+    stt = DevelopmentSTTProvider()
+
+    orchestrator = AgentOrchestrator(
+        router_client=mock_router,
+        stt_provider=stt,
+        audio_input=None,
+    )
+
+    with pytest.raises(AudioInputError) as exc:
+        await orchestrator.route_voice()
+    assert "No audio input source provided" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_route_voice_stt_transcription_error() -> None:
+    """Test route_voice propagates TranscriptionError when audio data is corrupted."""
+    from app.audio.exceptions import TranscriptionError
+    from app.audio.input import BufferAudioInput
+    from app.audio.stt import DevelopmentSTTProvider
+
+    mock_router = MockRouterClient()
+    stt = DevelopmentSTTProvider()
+    audio_input = BufferAudioInput(b"CORRUPT_AUDIO_PAYLOAD\x00\x01")
+
+    orchestrator = AgentOrchestrator(
+        router_client=mock_router,
+        stt_provider=stt,
+        audio_input=audio_input,
+    )
+
+    with pytest.raises(TranscriptionError):
+        await orchestrator.route_voice()
+

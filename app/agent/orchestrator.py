@@ -4,6 +4,8 @@ import logging
 import time
 from typing import Optional, Union
 
+from app.audio.exceptions import AudioInputError
+from app.audio.input import AudioInput
 from app.audio.stt import DevelopmentSTTProvider, STTProvider
 from app.audio.tts import DevelopmentTTSProvider, TTSProvider
 from app.cloud.client import CloudClient
@@ -45,6 +47,7 @@ class AgentOrchestrator:
         cloud_handler: Optional[CloudHandler] = None,
         stt_provider: Optional[STTProvider] = None,
         tts_provider: Optional[TTSProvider] = None,
+        audio_input: Optional[AudioInput] = None,
     ) -> None:
         self.router = router_client or RouterClient()
         self.memory = memory_store or MemoryStore()
@@ -56,6 +59,7 @@ class AgentOrchestrator:
 
         self.stt = stt_provider or DevelopmentSTTProvider()
         self.tts = tts_provider or DevelopmentTTSProvider()
+        self.audio_input = audio_input
 
     async def transcribe_audio(self, audio_data: bytes) -> str:
         """Convert input audio data to text query using the configured STTProvider.
@@ -67,6 +71,52 @@ class AgentOrchestrator:
             str: Transcribed text query.
         """
         return await self.stt.transcribe(audio_data)
+
+    async def route_audio(self, audio_data: bytes) -> tuple[str, RoutingDecision]:
+        """Convert audio bytes to text via STTProvider and route to SLM-Router.
+
+        Terminates strictly at the RoutingDecision without memory retrieval,
+        response generation, or TTS execution.
+
+        Args:
+            audio_data: Raw input audio bytes.
+
+        Returns:
+            tuple[str, RoutingDecision]: Transcribed query text and structured routing decision.
+        """
+        transcribed_text = await self.transcribe_audio(audio_data)
+        logger.info("[VOICE->ROUTER] Recognized query: '%s'", transcribed_text)
+        decision = await self.router.route(transcribed_text)
+        logger.info("[VOICE->ROUTER] Decision: %s (memory_required=%s)", decision.processing.value, decision.memory_required)
+        return transcribed_text, decision
+
+    async def route_voice(
+        self,
+        audio_input: Optional[AudioInput] = None,
+        duration: Optional[float] = None,
+    ) -> tuple[str, RoutingDecision]:
+        """Capture audio from an AudioInput source, transcribe via STT, and route to SLM-Router.
+
+        Args:
+            audio_input: Optional AudioInput instance (defaults to self.audio_input if configured).
+            duration: Optional duration in seconds for recording.
+
+        Returns:
+            tuple[str, RoutingDecision]: Transcribed query text and structured routing decision.
+
+        Raises:
+            AudioInputError: If no audio input source is provided or reading fails.
+        """
+        source = audio_input or self.audio_input
+        if source is None:
+            raise AudioInputError("No audio input source provided or configured in orchestrator")
+
+        try:
+            audio_bytes = await source.read(duration=duration)
+        except TypeError:
+            audio_bytes = await source.read()
+
+        return await self.route_audio(audio_bytes)
 
     async def process_voice(self, audio_data: bytes) -> tuple[AgentResponse, bytes]:
         """Process incoming voice audio through the Phase 1 audio pipeline and routing.

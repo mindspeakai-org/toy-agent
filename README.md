@@ -185,6 +185,49 @@ Recognized text:
 "What is my favorite animal?"
 ```
 
+### Step 3: Run Real Microphone → STT → SLM-Router Pipeline
+```bash
+python main.py --voice-router
+```
+
+Expected output:
+```
+============================================================
+TOY AGENT — REAL VOICE → STT → ROUTER
+============================================================
+
+🎤 Speak now...
+
+[capture audio]
+
+Recognized text:
+"What is my favorite animal?"
+
+Sending to SLM Router...
+
+Routing decision:
+{
+  "processing": "LOCAL",
+  "memory_required": true,
+  "memory_request": {
+    "keys": [
+      "favorite_animal"
+    ]
+  }
+}
+
+Pipeline:
+✓ physical microphone
+✓ real speech-to-text
+✓ router classification
+
+STOP HERE.
+
+Do not retrieve the value of memory keys.
+Do not generate a response.
+Do not execute anything.
+```
+
 ## 6. Configuration & Environment Variables
 
 Configuration is loaded from environment variables or `.env`:
@@ -227,7 +270,7 @@ When connected to the real `Qwen2.5-1.5B-Instruct` model on Apple Silicon (MPS),
 .venv/bin/pytest tests/ -v
 ```
 
-All 75 unit tests pass cleanly:
+All 80 unit tests pass cleanly:
 - **AudioInput tests**: verifies `BufferAudioInput` and `DevelopmentAudioInput`, ensuring empty/None inputs raise `AudioInputError`.
 - **STTProvider tests**: verifies deterministic transcription, registered mappings, fallback behavior, corrupt payload rejection (`TranscriptionError`), and strictly checks for zero Mac-native imports across `app/audio`.
 - **RouterClient tests**: health check success/failure, timeout handling, connection refused, malformed response, HTTP errors.
