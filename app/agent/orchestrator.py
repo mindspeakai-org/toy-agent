@@ -4,6 +4,8 @@ import logging
 import time
 from typing import Optional, Union
 
+from app.audio.stt import DevelopmentSTTProvider, STTProvider
+from app.audio.tts import DevelopmentTTSProvider, TTSProvider
 from app.cloud.client import CloudClient
 from app.handlers.cloud import CloudHandler
 from app.handlers.command import CommandHandler
@@ -28,11 +30,11 @@ class AgentOrchestrator:
     """Central orchestrator for the AI Toy Agent.
 
     Coordinates the complete conversational pipeline:
-    1. Receives user text.
+    1. Receives user text (or voice input via STTProvider).
     2. Invokes external RouterClient for query classification.
     3. Selects and executes the appropriate handler (LOCAL, MEMORY, COMMAND, CLOUD).
     4. Enforces robust fallbacks for all network/router failure modes.
-    5. Normalizes the output into an AgentResponse for the child.
+    5. Normalizes the output into an AgentResponse (and synthesizes audio via TTSProvider).
     """
 
     def __init__(
@@ -43,6 +45,8 @@ class AgentOrchestrator:
         memory_handler: Optional[MemoryHandler] = None,
         command_handler: Optional[CommandHandler] = None,
         cloud_handler: Optional[CloudHandler] = None,
+        stt_provider: Optional[STTProvider] = None,
+        tts_provider: Optional[TTSProvider] = None,
     ) -> None:
         self.router = router_client or RouterClient()
         self.memory = memory_store or MemoryStore()
@@ -51,6 +55,48 @@ class AgentOrchestrator:
         self.memory_handler = memory_handler or MemoryHandler(self.memory)
         self.command_handler = command_handler or CommandHandler()
         self.cloud_handler = cloud_handler or CloudHandler(CloudClient())
+
+        self.stt = stt_provider or DevelopmentSTTProvider()
+        self.tts = tts_provider or DevelopmentTTSProvider()
+
+    async def process_voice(self, audio_data: bytes) -> tuple[AgentResponse, bytes]:
+        """Process incoming voice audio through the end-to-end conversational pipeline.
+
+        Workflow:
+            Audio Input -> STT -> AgentOrchestrator -> RouterClient -> Handler -> TTS -> Audio Output
+
+        Args:
+            audio_data: Raw input audio bytes.
+
+        Returns:
+            tuple[AgentResponse, bytes]: The text response object and synthesized output audio bytes.
+        """
+        t_voice_start = time.perf_counter()
+
+        # Step 1: Speech-to-Text
+        transcribed_text = await self.stt.transcribe(audio_data)
+        stt_duration = round(time.perf_counter() - t_voice_start, 4)
+        logger.info("[VOICE STT] Transcribed %d audio bytes -> '%s' (%.3fs)", len(audio_data), transcribed_text, stt_duration)
+
+        # Step 2: Core Text Agent Processing
+        response = await self.process(transcribed_text)
+
+        # Step 3: Text-to-Speech
+        t_tts_start = time.perf_counter()
+        audio_output = await self.tts.synthesize(response.text)
+        tts_duration = round(time.perf_counter() - t_tts_start, 4)
+        logger.info("[VOICE TTS] Synthesized %d chars -> %d audio bytes (%.3fs)", len(response.text), len(audio_output), tts_duration)
+
+        # Record voice telemetry
+        response.metadata["voice"] = {
+            "stt_provider": self.stt.name,
+            "tts_provider": self.tts.name,
+            "stt_latency_s": stt_duration,
+            "tts_latency_s": tts_duration,
+            "audio_output_bytes": len(audio_output),
+        }
+
+        return response, audio_output
 
     async def process(self, text: str) -> AgentResponse:
         """Process user text through the routing and handler pipeline.

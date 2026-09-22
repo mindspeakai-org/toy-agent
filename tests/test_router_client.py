@@ -122,3 +122,51 @@ async def test_router_client_json_array_invalid() -> None:
         client = RouterClient(client=http_client)
         with pytest.raises(RouterResponseError):
             await client.route("Hello?")
+
+
+@pytest.mark.asyncio
+async def test_router_client_check_health_success() -> None:
+    """Test successful health check."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/health"
+        return httpx.Response(200, json={"status": "healthy", "model": "Qwen/Qwen2.5-1.5B-Instruct"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = RouterClient(client=http_client)
+        health = await client.check_health()
+        assert health["status"] == "healthy"
+        assert health["model"] == "Qwen/Qwen2.5-1.5B-Instruct"
+
+        is_h = await client.is_healthy()
+        assert is_h is True
+
+
+@pytest.mark.asyncio
+async def test_router_client_check_health_connection_error() -> None:
+    """Test health check when server connection fails."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = RouterClient(client=http_client)
+        with pytest.raises(RouterConnectionError):
+            await client.check_health()
+
+        is_h = await client.is_healthy()
+        assert is_h is False
+
+
+@pytest.mark.asyncio
+async def test_router_client_check_health_500() -> None:
+    """Test health check when server returns HTTP 500."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Error")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = RouterClient(client=http_client)
+        with pytest.raises(RouterResponseError):
+            await client.check_health()

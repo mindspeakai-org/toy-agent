@@ -25,7 +25,7 @@ def configure_logging(verbose: bool) -> None:
 async def interactive_repl(orchestrator: AgentOrchestrator, mode_desc: str, verbose: bool) -> None:
     """Run interactive text loop."""
     print("=" * 60)
-    print("🤖 TOY AGENT — PHASE 1 TEXT INTERFACE")
+    print("🤖 TOY AGENT — PHASE 2 INTERFACE")
     print(f"Mode: {mode_desc}")
     print("Type 'exit', 'quit', or press Ctrl+C to stop.")
     print("=" * 60)
@@ -68,7 +68,12 @@ def parse_args() -> argparse.Namespace:
         "--base-url",
         type=str,
         default=None,
-        help="Custom base URL for the external SLM router (e.g. http://localhost:8000).",
+        help="Custom base URL for the external SLM router (e.g. http://localhost:8008).",
+    )
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Run health check diagnostic against external SLM router and exit.",
     )
     parser.add_argument(
         "--memory-path",
@@ -91,6 +96,24 @@ async def main_async() -> None:
     configure_logging(args.verbose)
 
     settings = get_settings()
+
+    # Diagnostic health check mode
+    if args.health:
+        target_url = args.base_url or settings.router_base_url
+        client = RouterClient(base_url=target_url)
+        print(f"Checking health of SLM Router at {client.health_url}...")
+        try:
+            health_data = await client.check_health()
+            print(f"✅ SLM Router is HEALTHY:")
+            print(f"   Status: {health_data.get('status')}")
+            print(f"   Model:  {health_data.get('model')}")
+        except Exception as exc:
+            print(f"❌ SLM Router health check FAILED: {exc}")
+            sys.exit(1)
+        finally:
+            await client.aclose()
+        return
+
     memory_store = MemoryStore(args.memory_path)
 
     if args.mock_router:
@@ -100,6 +123,14 @@ async def main_async() -> None:
         target_url = args.base_url or settings.router_url
         mode_desc = f"External SLM Router API ({target_url})"
         router_client = RouterClient(base_url=args.base_url)
+
+        # Startup health verification
+        try:
+            health_info = await router_client.check_health()
+            logging.info("Connected to SLM Router [%s] - Status: %s", health_info.get("model", "SLM"), health_info.get("status"))
+        except Exception as exc:
+            logging.warning("SLM Router not reachable at startup (%s): %s", router_client.health_url, exc)
+            logging.warning("Continuing in resilient mode (queries will use safe fallbacks if router remains offline).")
 
     orchestrator = AgentOrchestrator(
         router_client=router_client,

@@ -1,7 +1,7 @@
 """Mock router client for testing without the external slm-router service."""
 
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.router.exceptions import RouterError
 from app.router.models import RouteType, RoutingDecision
@@ -148,6 +148,16 @@ class MockRouterClient:
             query=cleaned,
             handler="MockRouter",
         )
+
+    async def check_health(self) -> Dict[str, Any]:
+        """Mock health check."""
+        if self._injected_error:
+            raise self._injected_error
+        return {"status": "healthy", "model": "Mock-Qwen"}
+
+    async def is_healthy(self) -> bool:
+        """Mock health probe."""
+        return self._injected_error is None
 
     async def aclose(self) -> None:
         """No-op for mock client."""
