@@ -9,7 +9,7 @@ from app.handlers.command import CommandHandler
 from app.handlers.local import LocalHandler
 from app.handlers.memory import MemoryHandler
 from app.memory.store import MemoryStore
-from app.router.models import RouteType, RoutingDecision
+from app.router.models import MemoryRequest, ProcessingType, RouteType, RoutingDecision
 
 
 # --- LocalHandler Tests ---
@@ -64,14 +64,16 @@ async def test_memory_handler_query_hit(tmp_path: Path) -> None:
 
     handler = MemoryHandler(store)
     decision = RoutingDecision(
-        route=RouteType.MEMORY,
-        intent="MEMORY_QUERY",
-        key="favorite_animal",
+        processing=ProcessingType.LOCAL,
+        memory_required=True,
+        memory_request=MemoryRequest(keys=["favorite_animal"]),
     )
     response = await handler.handle("What is my favorite animal?", decision)
 
     assert response.success is True
-    assert "favorite animal is tiger" in response.text.lower()
+    assert response.memory_context is not None
+    assert response.memory_context.hits == {"favorite_animal": "tiger"}
+    assert response.memory_context.is_complete is True
 
 
 @pytest.mark.asyncio
@@ -79,48 +81,53 @@ async def test_memory_handler_query_miss(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "mem.json")
     handler = MemoryHandler(store)
     decision = RoutingDecision(
-        route=RouteType.MEMORY,
-        intent="MEMORY_QUERY",
-        key="favorite_color",
+        processing=ProcessingType.LOCAL,
+        memory_required=True,
+        memory_request=MemoryRequest(keys=["favorite_color"]),
     )
     response = await handler.handle("What is my favorite color?", decision)
 
     assert response.success is True
-    assert "don't know your favorite color yet" in response.text.lower()
+    assert response.memory_context is not None
+    assert response.memory_context.misses == ["favorite_color"]
+    assert response.memory_context.is_complete is False
 
 
 @pytest.mark.asyncio
-async def test_memory_handler_update(tmp_path: Path) -> None:
+async def test_memory_handler_multi_key(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "mem.json")
+    store.set("child_name", "Alex")
+    store.set("favorite_animal", "tiger")
+    handler = MemoryHandler(store)
+
+    decision = RoutingDecision(
+        processing=ProcessingType.LOCAL,
+        memory_required=True,
+        memory_request=MemoryRequest(keys=["child_name", "favorite_animal"]),
+    )
+    response = await handler.handle("What is my name and favorite animal?", decision)
+
+    assert response.success is True
+    assert response.memory_context is not None
+    assert response.memory_context.hits == {"child_name": "Alex", "favorite_animal": "tiger"}
+    assert response.memory_context.misses == []
+    assert response.memory_context.is_complete is True
+
+
+@pytest.mark.asyncio
+async def test_memory_handler_bypasses_when_memory_not_required(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "mem.json")
     handler = MemoryHandler(store)
 
     decision = RoutingDecision(
-        route=RouteType.MEMORY,
-        intent="MEMORY_UPDATE",
-        key="favorite_toy",
-        value="rocket",
+        processing=ProcessingType.LOCAL,
+        memory_required=False,
+        memory_request=None,
     )
-    response = await handler.handle("My favorite toy is a rocket", decision)
-
+    response = await handler.handle("Tell me a joke", decision)
     assert response.success is True
-    assert store.get("favorite_toy") == "rocket"
-    assert "remember that your favorite toy is rocket" in response.text.lower()
+    assert response.memory_context is None
 
-
-@pytest.mark.asyncio
-async def test_memory_handler_heuristic_extraction(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "mem.json")
-    handler = MemoryHandler(store)
-
-    # Empty decision key/value -> handler extracts from text
-    decision = RoutingDecision(route=RouteType.MEMORY)
-    update_res = await handler.handle("My favorite snack is cookies", decision)
-    assert update_res.success is True
-    assert store.get("favorite_snack") == "cookies"
-
-    # Query extraction
-    query_res = await handler.handle("What is my favorite snack?", decision)
-    assert "favorite snack is cookies" in query_res.text.lower()
 
 
 # --- CommandHandler Tests ---

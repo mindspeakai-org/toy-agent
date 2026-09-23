@@ -13,6 +13,7 @@ from app.handlers.cloud import CloudHandler
 from app.handlers.command import CommandHandler
 from app.handlers.local import LocalHandler
 from app.handlers.memory import MemoryHandler
+from app.memory.base import BaseMemoryStore
 from app.memory.store import MemoryStore
 from app.models.responses import AgentResponse
 from app.router.client import RouterClient
@@ -31,16 +32,15 @@ logger = logging.getLogger("toy_agent.orchestrator")
 class AgentOrchestrator:
     """Central orchestrator for the AI Toy Agent.
 
-    In Phase 2, coordinates:
-    Audio Input (optional) -> STT -> Text -> RouterClient -> RoutingDecision.
-    Downstream generation (memory retrieval, local/cloud model execution) is
-    deferred to subsequent phases.
+    Coordinates:
+    Audio Input (optional) -> STT -> Text -> RouterClient -> RoutingDecision -> MemoryStore (Phase 3).
+    Downstream generation (local/cloud model execution) is deferred to subsequent phases.
     """
 
     def __init__(
         self,
         router_client: Optional[Union[RouterClient, MockRouterClient]] = None,
-        memory_store: Optional[MemoryStore] = None,
+        memory_store: Optional[BaseMemoryStore] = None,
         local_handler: Optional[LocalHandler] = None,
         memory_handler: Optional[MemoryHandler] = None,
         command_handler: Optional[CommandHandler] = None,
@@ -218,6 +218,11 @@ class AgentOrchestrator:
         if decision.memory_request:
             logger.info("[MEMORY KEYS]      : %s", decision.memory_request.keys)
 
+        # Step 3: Device-Side Memory Retrieval (Phase 3)
+        memory_context = None
+        if decision.memory_required and self.memory_handler is not None:
+            memory_context = self.memory_handler.retrieve(decision)
+
         e2e_total_latency = round(time.perf_counter() - t_e2e_start, 4)
 
         # Telemetry metrics collection
@@ -227,19 +232,26 @@ class AgentOrchestrator:
             "e2e_total_s": e2e_total_latency,
         }
 
-        # In Phase 2, the pipeline terminates at RoutingDecision (no downstream generation).
-        # We wrap the decision in AgentResponse for consumer inspection.
+        # Format summary text cleanly
+        if memory_context:
+            text_desc = f"Routing decision: {decision.processing.value} (memory resolved: {len(memory_context.hits)} hits, {len(memory_context.misses)} misses)"
+        else:
+            text_desc = f"Routing decision: {decision.processing.value}"
+
+        # In Phase 3, the pipeline terminates at RoutingDecision + Optional[MemoryContext] (no downstream generation).
         response = AgentResponse(
-            text=f"Routing decision: {decision.processing.value}",
+            text=text_desc,
             processing=decision.processing,
             decision=decision,
-            route=RouteType(decision.processing.value),
-            handler="SLMRouter",
+            memory_context=memory_context,
+            route=RouteType.MEMORY if memory_context else RouteType(decision.processing.value),
+            handler="MemoryHandler" if memory_context else "SLMRouter",
             metadata={
                 "timings": timing_metrics,
                 "raw_response": decision.raw_response,
                 "memory_required": decision.memory_required,
                 "memory_keys": decision.memory_request.keys if decision.memory_request else [],
+                "memory_context": memory_context.model_dump() if memory_context else None,
             },
             success=True,
         )

@@ -263,13 +263,25 @@ async def run_voice_router_mode(
             print("\nRouting decision:")
             print(json.dumps(decision_dict, indent=2))
 
+            # Step 4: Device-side memory retrieval (Phase 3)
+            if decision.memory_required:
+                memory_ctx = orchestrator.memory_handler.retrieve(decision)
+                print("\nDevice Memory Context:")
+                if memory_ctx:
+                    print(json.dumps(memory_ctx.model_dump(), indent=2))
+                else:
+                    print("null")
+            else:
+                print("\nDevice Memory Context:")
+                print("[Bypassed: memory_required=false]")
+
             print("\nPipeline:")
             print("✓ physical microphone")
             print("✓ real speech-to-text")
             print("✓ router classification")
+            print("✓ device-side memory retrieval")
             print("\nSTOP HERE.")
-            print("\nDo not retrieve the value of memory keys.")
-            print("Do not generate a response.")
+            print("\nDo not generate a response.")
             print("Do not execute anything.")
 
             if not loop:

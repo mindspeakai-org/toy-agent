@@ -178,7 +178,7 @@ async def test_live_slm_router_integration() -> None:
     real_router = RouterClient(
         base_url=settings.router_base_url,
         endpoint=settings.router_route_endpoint,
-        timeout=15.0,
+        timeout=30.0,
     )
     orchestrator = AgentOrchestrator(router_client=real_router)
 
