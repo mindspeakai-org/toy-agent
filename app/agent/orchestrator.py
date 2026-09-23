@@ -13,7 +13,11 @@ from app.handlers.cloud import CloudHandler
 from app.handlers.command import CommandHandler
 from app.handlers.local import LocalHandler
 from app.handlers.memory import MemoryHandler
-from app.memory.base import BaseMemoryStore
+from app.generation.base import AnswerGenerator
+from app.generation.cloud import CloudAnswerGenerator
+from app.generation.exceptions import GenerationError
+from app.generation.local import LocalAnswerGenerator
+from app.memory.base import BaseMemoryStore, MemoryContext
 from app.memory.store import MemoryStore
 from app.models.responses import AgentResponse
 from app.router.client import RouterClient
@@ -33,8 +37,8 @@ class AgentOrchestrator:
     """Central orchestrator for the AI Toy Agent.
 
     Coordinates:
-    Audio Input (optional) -> STT -> Text -> RouterClient -> RoutingDecision -> MemoryStore (Phase 3).
-    Downstream generation (local/cloud model execution) is deferred to subsequent phases.
+    Audio Input (optional) -> STT -> Text -> RouterClient -> RoutingDecision
+    -> MemoryStore (if required) -> Local / Cloud Answer Generator -> answer_text (Phase 4).
     """
 
     def __init__(
@@ -48,6 +52,8 @@ class AgentOrchestrator:
         stt_provider: Optional[STTProvider] = None,
         tts_provider: Optional[TTSProvider] = None,
         audio_input: Optional[AudioInput] = None,
+        local_generator: Optional[AnswerGenerator] = None,
+        cloud_generator: Optional[AnswerGenerator] = None,
     ) -> None:
         self.router = router_client or RouterClient()
         self.memory = memory_store or MemoryStore()
@@ -60,6 +66,10 @@ class AgentOrchestrator:
         self.stt = stt_provider or DevelopmentSTTProvider()
         self.tts = tts_provider or DevelopmentTTSProvider()
         self.audio_input = audio_input
+
+        # Phase 4 Answer Generators
+        self.local_generator = local_generator or LocalAnswerGenerator()
+        self.cloud_generator = cloud_generator or CloudAnswerGenerator()
 
     async def transcribe_audio(self, audio_data: bytes) -> str:
         """Convert input audio data to text query using the configured STTProvider.
@@ -218,10 +228,47 @@ class AgentOrchestrator:
         if decision.memory_request:
             logger.info("[MEMORY KEYS]      : %s", decision.memory_request.keys)
 
-        # Step 3: Device-Side Memory Retrieval (Phase 3)
+        # Step 3 & 4: Memory Retrieval & Answer Generation (Phase 4)
         memory_context = None
-        if decision.memory_required and self.memory_handler is not None:
-            memory_context = self.memory_handler.retrieve(decision)
+        if decision.processing == ProcessingType.LOCAL:
+            if decision.memory_required and self.memory_handler is not None:
+                memory_context = self.memory_handler.retrieve(decision)
+
+            try:
+                answer_text = await self.local_generator.generate(
+                    query=cleaned_text,
+                    memory_context=memory_context,
+                )
+            except GenerationError as exc:
+                logger.error("Local answer generation failed: %s", exc)
+                return self._build_generation_failure(
+                    decision=decision,
+                    memory_context=memory_context,
+                    error=exc,
+                    generator_type="LOCAL",
+                )
+            handler_name = "LocalAnswerGenerator"
+
+        elif decision.processing == ProcessingType.CLOUD:
+            # Memory is strictly bypassed for CLOUD queries
+            memory_context = None
+            try:
+                answer_text = await self.cloud_generator.generate(
+                    query=cleaned_text,
+                    memory_context=None,
+                )
+            except GenerationError as exc:
+                logger.error("Cloud answer generation failed: %s", exc)
+                return self._build_generation_failure(
+                    decision=decision,
+                    memory_context=None,
+                    error=exc,
+                    generator_type="CLOUD",
+                )
+            handler_name = "CloudAnswerGenerator"
+        else:
+            answer_text = f"Unrecognized processing destination: {decision.processing}"
+            handler_name = "Orchestrator"
 
         e2e_total_latency = round(time.perf_counter() - t_e2e_start, 4)
 
@@ -232,20 +279,14 @@ class AgentOrchestrator:
             "e2e_total_s": e2e_total_latency,
         }
 
-        # Format summary text cleanly
-        if memory_context:
-            text_desc = f"Routing decision: {decision.processing.value} (memory resolved: {len(memory_context.hits)} hits, {len(memory_context.misses)} misses)"
-        else:
-            text_desc = f"Routing decision: {decision.processing.value}"
-
-        # In Phase 3, the pipeline terminates at RoutingDecision + Optional[MemoryContext] (no downstream generation).
         response = AgentResponse(
-            text=text_desc,
+            text=answer_text,
+            answer_text=answer_text,
             processing=decision.processing,
             decision=decision,
             memory_context=memory_context,
             route=RouteType.MEMORY if memory_context else RouteType(decision.processing.value),
-            handler="MemoryHandler" if memory_context else "SLMRouter",
+            handler=handler_name,
             metadata={
                 "timings": timing_metrics,
                 "raw_response": decision.raw_response,
@@ -264,6 +305,36 @@ class AgentOrchestrator:
         logger.info("[DECISION SUMMARY] : %s (memory_required=%s)", decision.processing.value, decision.memory_required)
         logger.info("================= PIPELINE END =================")
         return response
+
+    def _build_generation_failure(
+        self,
+        decision: RoutingDecision,
+        memory_context: Optional[MemoryContext],
+        error: Exception,
+        generator_type: str,
+    ) -> AgentResponse:
+        """Construct an observable failure response for generation errors during development."""
+        err_type = error.__class__.__name__
+        err_msg = str(error)
+        failure_text = f"[{generator_type} GENERATION FAILURE ({err_type})]: {err_msg}"
+        logger.error("GENERATION_FAILURE: %s", failure_text)
+        logger.info("================= PIPELINE END =================")
+        return AgentResponse(
+            text=failure_text,
+            answer_text=None,
+            processing=decision.processing,
+            decision=decision,
+            memory_context=memory_context,
+            route=RouteType(decision.processing.value),
+            handler=f"{generator_type.capitalize()}AnswerGenerator",
+            intent="GENERATION_FAILURE",
+            metadata={
+                "error_type": err_type,
+                "error_message": err_msg,
+                "generator_type": generator_type,
+            },
+            success=False,
+        )
 
     def _build_fallback(self, message: str, reason: str, error: str) -> AgentResponse:
         """Construct child-safe fallback response while preserving debug details in metadata."""

@@ -116,14 +116,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def run_voice_mode(duration: float, loop: bool, verbose: bool) -> None:
-    """Execute real microphone recording and Whisper speech-to-text pipeline."""
+async def run_voice_mode(
+    duration: float,
+    loop: bool,
+    verbose: bool,
+    base_url: Optional[str] = None,
+    mock_router: bool = False,
+) -> None:
+    """Execute complete Phase 4 pipeline: Mic -> STT -> Router -> Memory -> Answer Generation -> Text."""
+    import json
     from app.audio.exceptions import AudioError
     from app.audio.microphone import MicrophoneAudioInput
     from app.audio.whisper_stt import WhisperSTTProvider
 
     print("=" * 60)
-    print("🎤 TOY AGENT — REAL VOICE PIPELINE (PHASE 1)")
+    print("🎤 TOY AGENT — PHASE 4 COMPLETE PIPELINE (VOICE → ANSWER)")
     print("Audio Input:  MicrophoneAudioInput (16kHz mono)")
     print("STT Engine:   WhisperSTTProvider (faster-whisper 'tiny.en')")
     print(f"Duration:     {duration:.1f}s")
@@ -135,6 +142,24 @@ async def run_voice_mode(duration: float, loop: bool, verbose: bool) -> None:
     except Exception as exc:
         print(f"❌ Failed to initialize voice components: {exc}")
         return
+
+    # Initialize RouterClient
+    if mock_router:
+        router_client = MockRouterClient()
+    else:
+        router_client = RouterClient(base_url=base_url)
+        try:
+            health_info = await router_client.check_health()
+            if verbose:
+                print(f"[SLM-Router connected: {health_info.get('model', 'SLM')}]")
+        except Exception as exc:
+            print(f"⚠️ Warning: SLM-Router not reachable at {router_client.health_url}: {exc}")
+
+    orchestrator = AgentOrchestrator(
+        router_client=router_client,
+        stt_provider=stt_provider,
+        audio_input=audio_input,
+    )
 
     # Pre-warm local Whisper model
     if verbose:
@@ -155,12 +180,58 @@ async def run_voice_mode(duration: float, loop: bool, verbose: bool) -> None:
 
             print("\n🎤 Speak now...")
             audio_bytes = await audio_input.read(duration=duration)
-            print("[capture audio]")
-            print("[run real STT]")
+            print("\n[capture audio]")
 
             recognized_text = await stt_provider.transcribe(audio_bytes)
             print("\nRecognized text:")
             print(f'"{recognized_text}"')
+
+            if not recognized_text:
+                print("\n[No speech recognized. Skipping pipeline.]")
+                if not loop:
+                    break
+                continue
+
+            print("\nExecuting Phase 4 Orchestrator Pipeline...")
+            response = await orchestrator.process(recognized_text)
+
+            decision = response.decision
+            if decision:
+                decision_dict = {
+                    "processing": decision.processing.value,
+                    "memory_required": decision.memory_required,
+                    "memory_request": (
+                        {"keys": decision.memory_request.keys}
+                        if decision.memory_request
+                        else None
+                    ),
+                }
+                print("\nRouting decision:")
+                print(json.dumps(decision_dict, indent=2))
+
+            if response.memory_context:
+                print("\nDevice Memory Context:")
+                print(json.dumps(response.memory_context.model_dump(), indent=2))
+            elif decision and decision.memory_required:
+                print("\nDevice Memory Context: [None]")
+            else:
+                print("\nDevice Memory Context: [Bypassed]")
+
+            print(f"\nAnswer Generator: {response.handler}")
+            print("\nAnswer text:")
+            if response.success:
+                print(f'"{response.answer_text}"')
+            else:
+                print(f"❌ {response.text}")
+
+            print("\nPipeline:")
+            print("✓ physical microphone")
+            print("✓ real speech-to-text")
+            print("✓ router classification")
+            print(f"✓ device-side memory ({'retrieved' if response.memory_context else 'bypassed'})")
+            print(f"✓ answer generation ({response.handler})")
+            print("✓ text output printed")
+            print("\nSTOP HERE (no TTS or audio synthesis).")
 
             if not loop:
                 break
@@ -169,9 +240,16 @@ async def run_voice_mode(duration: float, loop: bool, verbose: bool) -> None:
             print(f"\n❌ Voice error: {exc}")
             if not loop:
                 break
+        except Exception as exc:
+            print(f"\n❌ Pipeline error: {exc}")
+            if not loop:
+                break
         except KeyboardInterrupt:
-            print("\nRecording cancelled.")
+            print("\nSession ended.")
             break
+        finally:
+            await orchestrator.aclose()
+
 
 
 async def run_voice_router_mode(
@@ -307,12 +385,14 @@ async def main_async() -> None:
     args = parse_args()
     configure_logging(args.verbose)
 
-    # Real voice pipeline mode (Phase 1: Mic -> STT)
+    # Real voice pipeline mode (Phase 4: Mic -> STT -> Router -> Memory -> Answer -> Text)
     if args.voice:
         await run_voice_mode(
             duration=args.voice_duration,
             loop=args.voice_loop,
             verbose=args.verbose,
+            base_url=args.base_url,
+            mock_router=args.mock_router,
         )
         return
 

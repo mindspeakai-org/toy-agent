@@ -12,6 +12,8 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.2.0",
     "python-dotenv>=1.0.0",
+    "torch>=2.14.0",
+    "transformers>=5.17.0",
 ]
 
 [project.optional-dependencies]

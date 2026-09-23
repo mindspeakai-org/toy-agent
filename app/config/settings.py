@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,6 +30,16 @@ class Settings(BaseSettings):
 
     # Cloud Integration (Phase 1 Stub)
     cloud_provider_stub_mode: bool = True
+
+    # Local Answer Generation (Phase 4)
+    local_answer_model: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    local_generation_max_tokens: int = 128
+    local_generation_temperature: float = 0.0
+
+    # Cloud Answer Generation (Gemini - Phase 4)
+    gemini_api_key: Optional[str] = None
+    gemini_model: str = "gemini-1.5-flash"
+    gemini_timeout_seconds: float = 15.0
 
     @property
     def router_url(self) -> str:

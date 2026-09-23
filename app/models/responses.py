@@ -11,6 +11,7 @@ class AgentResponse(BaseModel):
     """Normalized response delivered by the toy agent."""
 
     text: str = Field(default="", description="Child-facing text response or decision message")
+    answer_text: Optional[str] = Field(default=None, description="Generated final natural language answer text")
     processing: Optional[ProcessingType] = Field(default=None, description="Target processing destination")
     decision: Optional[RoutingDecision] = Field(default=None, description="Structured routing decision from router")
     memory_context: Optional[MemoryContext] = Field(default=None, description="Resolved device-side memory context if memory was required")
