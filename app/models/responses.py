@@ -18,5 +18,7 @@ class AgentResponse(BaseModel):
     route: Optional[RouteType] = Field(default=None, description="Legacy route identifier for compatibility")
     handler: str = Field(default="Router", description="Name of the executing handler")
     intent: Optional[str] = Field(default=None, description="Intent associated with the response")
+    audio: Optional[bytes] = Field(default=None, description="Synthesized TTS WAV audio bytes")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata for tracing")
     success: bool = Field(default=True, description="Whether execution completed without error")
+

@@ -4,10 +4,12 @@ import logging
 import time
 from typing import Optional, Union
 
-from app.audio.exceptions import AudioInputError
+from app.audio.exceptions import AudioInputError, AudioOutputError, TTSError
 from app.audio.input import AudioInput
+from app.audio.output import AudioOutput
 from app.audio.stt import DevelopmentSTTProvider, STTProvider
 from app.audio.tts import DevelopmentTTSProvider, TTSProvider
+
 from app.cloud.client import CloudClient
 from app.handlers.cloud import CloudHandler
 from app.handlers.command import CommandHandler
@@ -52,6 +54,7 @@ class AgentOrchestrator:
         stt_provider: Optional[STTProvider] = None,
         tts_provider: Optional[TTSProvider] = None,
         audio_input: Optional[AudioInput] = None,
+        audio_output: Optional[AudioOutput] = None,
         local_generator: Optional[AnswerGenerator] = None,
         cloud_generator: Optional[AnswerGenerator] = None,
     ) -> None:
@@ -66,10 +69,12 @@ class AgentOrchestrator:
         self.stt = stt_provider or DevelopmentSTTProvider()
         self.tts = tts_provider or DevelopmentTTSProvider()
         self.audio_input = audio_input
+        self.audio_output = audio_output
 
         # Phase 4 Answer Generators
         self.local_generator = local_generator or LocalAnswerGenerator()
         self.cloud_generator = cloud_generator or CloudAnswerGenerator()
+
 
     async def transcribe_audio(self, audio_data: bytes) -> str:
         """Convert input audio data to text query using the configured STTProvider.
@@ -147,14 +152,23 @@ class AgentOrchestrator:
         stt_duration = round(time.perf_counter() - t_voice_start, 4)
         logger.info("[VOICE STT] Transcribed %d audio bytes -> '%s' (%.3fs)", len(audio_data), transcribed_text, stt_duration)
 
-        # Step 2: Text Routing Process
+        # Step 2: Text Routing Process (Includes Answer Generation & TTS synthesis)
         response = await self.process(transcribed_text)
 
-        # Step 3: Text-to-Speech synthesis
-        t_tts_start = time.perf_counter()
-        audio_output = await self.tts.synthesize(response.text)
-        tts_duration = round(time.perf_counter() - t_tts_start, 4)
-        logger.info("[VOICE TTS] Synthesized %d chars -> %d audio bytes (%.3fs)", len(response.text), len(audio_output), tts_duration)
+        # Step 3: Resolve output audio bytes
+        if response.audio is not None and len(response.audio) > 0:
+            audio_output = response.audio
+            tts_duration = response.metadata.get("timings", {}).get("tts_s", 0.0)
+        else:
+            t_tts_start = time.perf_counter()
+            audio_output = await self.tts.synthesize(response.text)
+            tts_duration = round(time.perf_counter() - t_tts_start, 4)
+            logger.info(
+                "[VOICE TTS] Synthesized fallback %d chars -> %d audio bytes (%.3fs)",
+                len(response.text),
+                len(audio_output),
+                tts_duration,
+            )
 
         response.metadata["voice"] = {
             "stt_provider": self.stt.name,
@@ -165,6 +179,7 @@ class AgentOrchestrator:
         }
 
         return response, audio_output
+
 
     async def process(self, text: str) -> AgentResponse:
         """Process user text through RouterClient to produce a structured RoutingDecision.
@@ -297,6 +312,51 @@ class AgentOrchestrator:
             success=True,
         )
 
+        # Step 5: Text-to-Speech synthesis and Audio Output (Phase 5)
+        if response.success and response.answer_text and response.answer_text.strip():
+            t_tts_start = time.perf_counter()
+            try:
+                audio_bytes = await self.tts.synthesize(response.answer_text)
+                response.audio = audio_bytes
+                tts_duration = round(time.perf_counter() - t_tts_start, 4)
+                timing_metrics["tts_s"] = tts_duration
+                logger.info(
+                    "[TTS] Synthesized %d chars -> %d audio bytes (%.3fs)",
+                    len(response.answer_text),
+                    len(audio_bytes),
+                    tts_duration,
+                )
+            except Exception as exc:
+                logger.error("TTS synthesis failed: %s", exc)
+                return self._build_tts_failure(
+                    decision=decision,
+                    memory_context=memory_context,
+                    answer_text=response.answer_text,
+                    error=exc,
+                )
+
+            if self.audio_output is not None and audio_bytes:
+                t_out_start = time.perf_counter()
+                try:
+                    await self.audio_output.play(audio_bytes)
+                    out_duration = round(time.perf_counter() - t_out_start, 4)
+                    timing_metrics["audio_output_s"] = out_duration
+                    logger.info(
+                        "[AUDIO OUTPUT] Played %d bytes via %s (%.3fs)",
+                        len(audio_bytes),
+                        self.audio_output.name,
+                        out_duration,
+                    )
+                except Exception as exc:
+                    logger.error("Audio output playback failed: %s", exc)
+                    return self._build_audio_output_failure(
+                        decision=decision,
+                        memory_context=memory_context,
+                        answer_text=response.answer_text,
+                        audio_data=response.audio,
+                        error=exc,
+                    )
+
         logger.info(
             "[LATENCY METRICS]  : HTTP=%.3fs | E2E_Tot=%.3fs",
             decision.http_latency or 0.0,
@@ -305,6 +365,67 @@ class AgentOrchestrator:
         logger.info("[DECISION SUMMARY] : %s (memory_required=%s)", decision.processing.value, decision.memory_required)
         logger.info("================= PIPELINE END =================")
         return response
+
+    def _build_tts_failure(
+        self,
+        decision: RoutingDecision,
+        memory_context: Optional[MemoryContext],
+        answer_text: Optional[str],
+        error: Exception,
+    ) -> AgentResponse:
+        """Construct an observable failure response for TTS synthesis errors."""
+        err_type = error.__class__.__name__
+        err_msg = str(error)
+        failure_text = f"[TTS FAILURE ({err_type})]: {err_msg}"
+        logger.error("TTS_FAILURE: %s", failure_text)
+        logger.info("================= PIPELINE END =================")
+        return AgentResponse(
+            text=failure_text,
+            answer_text=answer_text,
+            processing=decision.processing,
+            decision=decision,
+            memory_context=memory_context,
+            route=RouteType(decision.processing.value),
+            handler="TTS",
+            intent="TTS_FAILURE",
+            audio=None,
+            metadata={
+                "error_type": err_type,
+                "error_message": err_msg,
+            },
+            success=False,
+        )
+
+    def _build_audio_output_failure(
+        self,
+        decision: RoutingDecision,
+        memory_context: Optional[MemoryContext],
+        answer_text: Optional[str],
+        audio_data: Optional[bytes],
+        error: Exception,
+    ) -> AgentResponse:
+        """Construct an observable failure response for audio playback errors."""
+        err_type = error.__class__.__name__
+        err_msg = str(error)
+        failure_text = f"[AUDIO OUTPUT FAILURE ({err_type})]: {err_msg}"
+        logger.error("AUDIO_OUTPUT_FAILURE: %s", failure_text)
+        logger.info("================= PIPELINE END =================")
+        return AgentResponse(
+            text=failure_text,
+            answer_text=answer_text,
+            processing=decision.processing,
+            decision=decision,
+            memory_context=memory_context,
+            route=RouteType(decision.processing.value),
+            handler="AudioOutput",
+            intent="AUDIO_OUTPUT_FAILURE",
+            audio=audio_data,
+            metadata={
+                "error_type": err_type,
+                "error_message": err_msg,
+            },
+            success=False,
+        )
 
     def _build_generation_failure(
         self,
@@ -355,3 +476,6 @@ class AgentOrchestrator:
         """Cleanly close network and resource handles."""
         if hasattr(self.router, "aclose"):
             await self.router.aclose()
+        if self.audio_output is not None and hasattr(self.audio_output, "stop"):
+            await self.audio_output.stop()
+

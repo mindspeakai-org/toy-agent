@@ -123,22 +123,28 @@ async def run_voice_mode(
     base_url: Optional[str] = None,
     mock_router: bool = False,
 ) -> None:
-    """Execute complete Phase 4 pipeline: Mic -> STT -> Router -> Memory -> Answer Generation -> Text."""
+    """Execute complete Phase 5 pipeline: Mic -> STT -> Router -> Memory -> Answer -> Piper TTS -> Speaker."""
     import json
     from app.audio.exceptions import AudioError
     from app.audio.microphone import MicrophoneAudioInput
+    from app.audio.output import SpeakerAudioOutput
+    from app.audio.tts import PiperTTSProvider
     from app.audio.whisper_stt import WhisperSTTProvider
 
     print("=" * 60)
-    print("🎤 TOY AGENT — PHASE 4 COMPLETE PIPELINE (VOICE → ANSWER)")
+    print("🎤 TOY AGENT — PHASE 5 COMPLETE VOICE PIPELINE (VOICE IN → VOICE OUT)")
     print("Audio Input:  MicrophoneAudioInput (16kHz mono)")
     print("STT Engine:   WhisperSTTProvider (faster-whisper 'tiny.en')")
+    print("TTS Engine:   PiperTTSProvider (rhasspy/piper-voices 'en_US-lessac-medium')")
+    print("Audio Output: SpeakerAudioOutput (System Default Speaker)")
     print(f"Duration:     {duration:.1f}s")
     print("=" * 60)
 
     try:
         audio_input = MicrophoneAudioInput(default_duration=duration)
         stt_provider = WhisperSTTProvider(model_size="tiny.en")
+        tts_provider = PiperTTSProvider()
+        audio_output = SpeakerAudioOutput()
     except Exception as exc:
         print(f"❌ Failed to initialize voice components: {exc}")
         return
@@ -158,7 +164,9 @@ async def run_voice_mode(
     orchestrator = AgentOrchestrator(
         router_client=router_client,
         stt_provider=stt_provider,
+        tts_provider=tts_provider,
         audio_input=audio_input,
+        audio_output=audio_output,
     )
 
     # Pre-warm local Whisper model
@@ -169,6 +177,14 @@ async def run_voice_mode(
     except Exception as exc:
         print(f"❌ STT initialization failure: {exc}")
         return
+
+    # Pre-warm local Piper TTS voice model
+    if verbose:
+        print("Pre-warming local Piper TTS model...")
+    try:
+        _ = tts_provider._load_voice()
+    except Exception as exc:
+        print(f"⚠️ Piper voice pre-warming note: {exc}")
 
     while True:
         try:
@@ -192,7 +208,7 @@ async def run_voice_mode(
                     break
                 continue
 
-            print("\nExecuting Phase 4 Orchestrator Pipeline...")
+            print("\nExecuting Orchestrator Pipeline...")
             response = await orchestrator.process(recognized_text)
 
             decision = response.decision
@@ -231,7 +247,8 @@ async def run_voice_mode(
             print(f"✓ device-side memory ({'retrieved' if response.memory_context else 'bypassed'})")
             print(f"✓ answer generation ({response.handler})")
             print("✓ text output printed")
-            print("\nSTOP HERE (no TTS or audio synthesis).")
+            print(f"✓ Piper TTS synthesis ({'done (' + str(len(response.audio)) + ' bytes)' if response.audio else 'skipped'})")
+            print(f"✓ physical speaker playback ({'done' if response.audio else 'skipped'})")
 
             if not loop:
                 break
@@ -249,6 +266,7 @@ async def run_voice_mode(
             break
         finally:
             await orchestrator.aclose()
+
 
 
 

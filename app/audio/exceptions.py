@@ -20,3 +20,22 @@ class TranscriptionError(AudioError):
     """Raised when speech-to-text transcription fails or audio data is malformed."""
 
     pass
+
+
+class AudioOutputError(AudioError):
+    """Raised when audio playback or output stream encounters a failure."""
+
+    pass
+
+
+class TTSError(AudioError):
+    """Base exception for text-to-speech synthesis failures."""
+
+    pass
+
+
+class SynthesisError(TTSError):
+    """Raised when speech synthesis fails or audio model encounters an error."""
+
+    pass
+
